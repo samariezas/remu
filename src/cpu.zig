@@ -32,7 +32,8 @@ fn Bus(comptime Tword: type) type {
         }
 
         fn readMemory(self: *Self, address: Tword, dest: []u8) !void {
-            @memcpy(dest, try self.getMemorySlice(address, dest.len));
+            const length: Tword = @intCast(dest.len);
+            @memcpy(dest, try self.getMemorySlice(address, length));
         }
 
         fn readWord(self: *Self, address: Tword) !Tword {
@@ -42,7 +43,8 @@ fn Bus(comptime Tword: type) type {
         }
 
         fn writeMemory(self: *Self, address: Tword, src: []const u8) !void {
-            @memcpy(try self.getMemorySlice(address, src.len), src);
+            const length: Tword = @intCast(src.len);
+            @memcpy(try self.getMemorySlice(address, length), src);
         }
 
         fn writeWord(self: *Self, address: Tword, word: Tword) !void {
@@ -77,9 +79,10 @@ fn RVCPU(comptime Tword: type) type {
     };
 }
 
+const rv32 = RVCPU(u32);
 const rv64 = RVCPU(u64);
 
-test "ram reading" {
+test "64bit bus operations" {
     const allocator = std.testing.allocator;
     const start: u64 = 0x0800_0000;
     const length: u64 = 0x0001_0000;
@@ -92,4 +95,19 @@ test "ram reading" {
     var buffer: [8]u8 = undefined;
     @memcpy(&buffer, bus.memory[0xa00..0xa08]);
     try std.testing.expectEqualSlices(u8, &[8]u8{ 0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, &buffer);
+}
+
+test "32bit bus operations" {
+    const allocator = std.testing.allocator;
+    const start: u32 = 0x0800_0000;
+    const length: u32 = 0x0001_0000;
+    var bus = try Bus(u32).init(allocator, start, length);
+    defer bus.deinit(allocator);
+    @memcpy(bus.memory[10..14], &[4]u8{ 0x12, 0x34, 0x56, 0x78 });
+    const word = try bus.readWord(0x0800_000a);
+    try std.testing.expectEqual(0x78563412, word);
+    try bus.writeWord(0x0800_0a00, 0x1234);
+    var buffer: [4]u8 = undefined;
+    @memcpy(&buffer, bus.memory[0xa00..0xa04]);
+    try std.testing.expectEqualSlices(u8, &[4]u8{ 0x34, 0x12, 0x00, 0x00 }, &buffer);
 }
