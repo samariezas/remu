@@ -470,7 +470,7 @@ pub fn RVCPU(comptime Tword: type) type {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
-                self.getRegister(parsed.rs1) | parsed.imm
+                self.getRegister(parsed.rs1) | signExtend(Tword, parsed.imm)
             );
         }
 
