@@ -279,6 +279,9 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("SLLI", 0b0010011, 1, handleSlli, null, true),
             Instr.makeF3("SRAI", 0b0010011, 5, handleSrai, null, true),
             Instr.makeF3("BLT", 0b1100011, 4, handleBlt, null, false),
+            Instr.makeF3("BGE", 0b1100011, 5, handleBge, null, false),
+            Instr.makeF3("BLTU", 0b1100011, 6, handleBltu, null, false),
+            Instr.makeF3("BGEU", 0b1100011, 7, handleBgeu, null, false),
             Instr.makeF3("ECALL", 0b1110011, 0, handleEcall, null, false),
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, null, true),
             Instr.makeF37("SUB", 0b0110011, 0, 0x20, handleSub, RTypeInstruction.write, true),
@@ -395,8 +398,39 @@ pub fn RVCPU(comptime Tword: type) type {
             const imm = parsed.getImm(Tword);
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
-            std.debug.print("Imm: {}\n", .{imm});
             if (reg1 < reg2) {
+                self.pc += imm;
+            } else {
+                self.pc += 4;
+            }
+        }
+
+        fn handleBge(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            if (reg1 >= reg2) {
+                self.pc += imm;
+            } else {
+                self.pc += 4;
+            }
+        }
+
+        fn handleBltu(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) < self.getRegister(parsed.rs2)) {
+                self.pc += imm;
+            } else {
+                self.pc += 4;
+            }
+        }
+
+        fn handleBgeu(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) >= self.getRegister(parsed.rs2)) {
                 self.pc += imm;
             } else {
                 self.pc += 4;
