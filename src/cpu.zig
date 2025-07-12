@@ -280,7 +280,6 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("SRAI", 0b0010011, 5, handleSrai, null, true),
             Instr.makeF3("BLT", 0b1100011, 4, handleBlt, null, false),
             Instr.makeF3("ECALL", 0b1110011, 0, handleEcall, null, false),
-            Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, null, true),
             Instr.makeF37("SUB", 0b0110011, 0, 0x20, handleSub, RTypeInstruction.write, true),
             Instr.makeF3("SB", 0b0100011, 0, handleSb, STypeInstruction.write, true),
@@ -291,6 +290,12 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("LW", 0b0000011, 2, handleLw, ITypeInstruction.write, true),
             Instr.makeF3("LBU", 0b0000011, 4, handleLbu, ITypeInstruction.write, true),
             Instr.makeF3("LHU", 0b0000011, 5, handleLhu, ITypeInstruction.write, true),
+            Instr.makeF37("AND", 0b0110011, 7, 0, handleAnd, RTypeInstruction.write, true),
+            Instr.makeF37("OR", 0b0110011, 6, 0, handleOr, RTypeInstruction.write, true),
+            Instr.makeF37("XOR", 0b0110011, 4, 0, handleXor, RTypeInstruction.write, true),
+            Instr.makeF3("ANDI", 0b0010011, 7, handleAndi, ITypeInstruction.write, true),
+            Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
+            Instr.makeF3("XORI", 0b0010011, 4, handleXori, RTypeInstruction.write, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -466,11 +471,27 @@ pub fn RVCPU(comptime Tword: type) type {
             }
         }
 
+        fn handleAndi(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) & signExtend(Tword, parsed.imm)
+            );
+        }
+
         fn handleOri(self: *Self, instruction: u32) void {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) | signExtend(Tword, parsed.imm)
+            );
+        }
+
+        fn handleXori(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) ^ signExtend(Tword, parsed.imm)
             );
         }
 
@@ -537,6 +558,30 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleLhu(self: *Self, instruction: u32) void {
             self.genericLoadHandler(u16, instruction, false);
+        }
+
+        fn handleAnd(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) & self.getRegister(parsed.rs2)
+            );
+        }
+
+        fn handleOr(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) | self.getRegister(parsed.rs2)
+            );
+        }
+
+        fn handleXor(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) ^ self.getRegister(parsed.rs2)
+            );
         }
 
         pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
