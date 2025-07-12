@@ -272,6 +272,7 @@ pub fn RVCPU(comptime Tword: type) type {
         const instructions = [_]Instr {
             Instr.makeF37("ADD", 0b0110011, 0, 0, handleAdd, RTypeInstruction.write, true),
             Instr.makeNone("JAL", 0b1101111, handleJump, null, false),
+            Instr.makeF3("JALR", 0b1100111, 0, handleJalr, null, false),
             Instr.makeF3("ADDI", 0b0010011, 0, handleAddImmediate, ITypeInstruction.write, true),
             Instr.makeF3("BNE", 0b1100011, 1, handleBne, null, false),
             Instr.makeF3("BEQ", 0b1100011, 0, handleBeq, null, false),
@@ -391,6 +392,13 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(parsed.rd, self.pc + 4);
             const imm = parsed.getImm(Tword);
             self.pc +%= imm;
+        }
+
+        fn handleJalr(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const new_pc = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
+            self.setRegister(parsed.rd, self.pc + 4);
+            self.pc = new_pc;
         }
 
         fn handleBlt(self: *Self, instruction: u32) void {
