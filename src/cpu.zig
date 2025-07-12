@@ -3,9 +3,16 @@ const Allocator = std.mem.Allocator;
 const LittleEndian = std.builtin.Endian.little;
 
 fn toSigned(comptime T: type) type {
-    if (T == u32) { return i32; }
-    else if (T == u64) { return i64; }
-    else { @panic("Wrong value"); }
+    return std.meta.Int(.signed, @typeInfo(T).int.bits);
+}
+
+fn signExtend(comptime T: type, val: anytype) T {
+    // TODO: assertions about types
+    const SignedOriginalType = toSigned(@TypeOf(val)); //i12
+    const SignedExtendedType = toSigned(T);            //i32
+    const signed: SignedOriginalType = @bitCast(val);  //bitcast to i12
+    const signed_extended: SignedExtendedType = @intCast(signed); //extend to i32
+    return @bitCast(signed_extended);                  //return u32
 }
 
 fn Bus(comptime Tword: type) type {
@@ -68,31 +75,63 @@ const InstructionID = union(enum) {
     funct_3_7: struct { funct3: u3, funct7: u7 },
 };
 
-const Instruction = struct {
-    opcode: u7,
-    id: InstructionID,
+fn InstructionDescriptor(comptime Tword: type) type {
+    return struct {
+        const InstructionHandler = *const fn (*RVCPU(Tword), u32) void;
+        const WriterHandler = *const fn (std.io.AnyWriter, u32) anyerror!void;
 
-    fn makeNone(opcode: u7) Instruction {
-        return .{
-            .opcode = opcode,
-            .id = InstructionID.none,
-        };
-    }
+        opcode: u7,
+        id: InstructionID,
+        handler: InstructionHandler,
+        name: []const u8,
+        advance_pc: bool,
+        writer_fn: ?WriterHandler,
 
-    fn makeF3(opcode: u7, funct3: u3) Instruction {
-        return .{
-            .opcode = opcode,
-            .id = InstructionID { .funct_3 = .{ .funct3 = funct3 } },
-        };
-    }
+        const Self = @This();
 
-    fn makeF37(opcode: u7, funct3: u3, funct7: u7) Instruction {
-        return .{
-            .opcode = opcode,
-            .id = InstructionID { .funct_3_7 = .{ .funct3 = funct3, .funct7 = funct7 } },
-        };
-    }
-};
+        fn print(self: *const Self, writer: std.io.AnyWriter, instruction: u32) !void {
+            if (self.writer_fn) |writer_fn| {
+                std.debug.assert((instruction & 0x7f) == self.opcode);
+                try writer.print("{s} ", .{self.name});
+                try writer_fn(writer, instruction);
+                try writer.writeAll("\n");
+            }
+        }
+
+        fn makeNone(name: []const u8, opcode: u7, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID.none,
+                .handler = handler,
+                .name = name,
+                .advance_pc = advance_pc,
+                .writer_fn = writer_fn,
+            };
+        }
+
+        fn makeF3(name: []const u8, opcode: u7, funct3: u3, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID { .funct_3 = .{ .funct3 = funct3 } },
+                .handler = handler,
+                .name = name,
+                .advance_pc = advance_pc,
+                .writer_fn = writer_fn,
+            };
+        }
+
+        fn makeF37(name: []const u8, opcode: u7, funct3: u3, funct7: u7, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID { .funct_3_7 = .{ .funct3 = funct3, .funct7 = funct7 } },
+                .handler = handler,
+                .name = name,
+                .advance_pc = advance_pc,
+                .writer_fn = writer_fn,
+            };
+        }
+    };
+}
 
 pub const InstructionIdentifiers = packed struct {
     opcode: u7,
@@ -109,6 +148,11 @@ pub const RTypeInstruction = packed struct {
     rs1: u5,
     rs2: u5,
     funct7: u7,
+
+    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
+        const decoded: @This() = @bitCast(instruction);
+        try writer.print("x{}, x{}, x{}", .{decoded.rd, decoded.rs1, decoded.rs2});
+    }
 };
 
 const ITypeInstruction = packed struct {
@@ -117,6 +161,11 @@ const ITypeInstruction = packed struct {
     funct3: u3,
     rs1: u5,
     imm: u12,
+
+    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
+        const decoded: @This() = @bitCast(instruction);
+        try writer.print("x{}, x{}, {}", .{decoded.rd, decoded.rs1, decoded.imm});
+    }
 };
 
 const STypeInstruction = packed struct {
@@ -136,6 +185,11 @@ const UTypeInstruction = packed struct {
     opcode: u7,
     rd: u5,
     imm: u20,
+
+    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
+        const decoded: @This() = @bitCast(instruction);
+        try writer.print("x{}, 0x{x}", .{decoded.rd, decoded.imm});
+    }
 };
 
 const JTypeInstruction = packed struct {
@@ -160,6 +214,14 @@ const JTypeInstruction = packed struct {
             (imm3 << 1)
         );
     }
+
+    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
+        const decoded: @This() = @bitCast(instruction);
+        const sign = (if (decoded.getSign()) "+" else "-");
+        _ = writer;
+        _ = sign;
+        // try w iter.print("{s}0x{x:0>8}", .{sign, decoded.getImm()});
+    }
 };
 
 const BTypeInstruction = packed struct {
@@ -177,7 +239,6 @@ const BTypeInstruction = packed struct {
         const imm2: u13 = @intCast(self.imm2);
         const imm3: u13 = @intCast(self.imm3);
         const imm4: u13 = @intCast(self.imm4);
-        // std.debug.print("Imms parts: {} {} {} {}\n", .{imm1, imm2, imm3, imm4});
         return (
             (imm1 << 11) |
             (imm2 << 1) |
@@ -196,23 +257,20 @@ pub fn RVCPU(comptime Tword: type) type {
 
         const Self = @This();
 
-        const InstructionHandler = fn (*Self, u32) void;
+        const Instr = InstructionDescriptor(Tword);
 
-        const instructions = [_]struct{Instruction, *const InstructionHandler, bool} {
-            .{Instruction.makeF37(0b0110011, 0, 0), handleAdd, true},
-            .{Instruction.makeNone(0b1101111), handleJump, false},
-            .{Instruction.makeF3(0b0010011, 0), handleAddImmediate, true},
-            .{Instruction.makeF3(0b1100011, 1), handleBne, false},
-            .{Instruction.makeF3(0b1100011, 0), handleBeq, false},
-            // .{Instruction.makeNone(0b0010111), handleAuipc, true},
-            // .{Instruction.makeF3(0b1110011, 2), handleCsrrs, true},
-            // .{Instruction.makeF3(0b1110011, 1), handleCsrrw, true},
-            // .{Instruction.makeF3(0b1110011, 5), handleCsrrwi, true},
-            .{Instruction.makeNone(0b0110111), handleLui, true},
-            .{Instruction.makeF3(0b0010011, 1), handleSlli, true},
-            .{Instruction.makeF3(0b1100011, 4), handleBlt, false},
-            .{Instruction.makeF3(0b1110011, 0), handleEcall, false},
-            .{Instruction.makeF3(0b0010011, 6), handleOri, true},
+        const instructions = [_]Instr {
+            Instr.makeF37("ADD", 0b0110011, 0, 0, handleAdd, RTypeInstruction.write, true),
+            Instr.makeNone("JAL", 0b1101111, handleJump, null, false),
+            Instr.makeF3("ADDI", 0b0010011, 0, handleAddImmediate, ITypeInstruction.write, true),
+            Instr.makeF3("BNE", 0b1100011, 1, handleBne, null, false),
+            Instr.makeF3("BEQ", 0b1100011, 0, handleBeq, null, false),
+            Instr.makeNone("LUI", 0b0110111, handleLui, UTypeInstruction.write, true),
+            Instr.makeF3("SLLI", 0b0010011, 1, handleSlli, null, true),
+            Instr.makeF3("SRAI", 0b0010011, 5, handleSrai, null, true),
+            Instr.makeF3("BLT", 0b1100011, 4, handleBlt, null, false),
+            Instr.makeF3("ECALL", 0b1110011, 0, handleEcall, null, false),
+            Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -225,7 +283,7 @@ pub fn RVCPU(comptime Tword: type) type {
             }
         }
 
-        fn matches(id: InstructionIdentifiers, instruction: Instruction) bool {
+        fn matches(id: InstructionIdentifiers, instruction: *const Instr) bool {
             if (id.opcode != instruction.opcode) {
                 return false;
             }
@@ -237,18 +295,32 @@ pub fn RVCPU(comptime Tword: type) type {
             return false;
         }
 
+        fn writeRegisters(self: *Self, writer: std.io.AnyWriter, width: usize) !void {
+            for (0..self.registers.len) |i| {
+                var buffer: [16]u8 = undefined;
+                const sep = if ((i + 1) % width == 0) "\n" else " ";
+                const register_name = try std.fmt.bufPrint(&buffer, "x{}", .{i});
+                try writer.print("{s: >3}={x:0>8}{s}", .{register_name, self.registers[i], sep});
+            }
+        }
+
         pub fn tick(self: *Self) !void {
             std.debug.assert(self.registers[0] == 0);
             const instruction = try self.getNextInstruction();
             const instruction_id: InstructionIdentifiers = @bitCast(instruction);
-            std.debug.print("Instruction: PC=0x{X:0>8} Instr=0x{X:0>8}\n", .{self.pc, instruction});
+            std.debug.print("Instruction: PC=0x{x:0>8} Instr=0x{x:0>8}\n", .{self.pc, instruction});
             std.debug.print("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
+            const stderr = std.io.getStdErr();
+            const writer = stderr.writer().any();
             for (instructions) |i| {
-                if (matches(instruction_id, i[0])) {
-                    i[1](self, instruction);
-                    if (i[2]) {
+                if (matches(instruction_id, &i)) {
+                    try i.print(writer, instruction);
+                    i.handler(self, instruction);
+                    try self.writeRegisters(writer, 4);
+                    if (i.advance_pc) {
                         self.pc += 4;
                     }
+                    std.debug.print("\n", .{});
                     return;
                 }
             }
@@ -265,15 +337,16 @@ pub fn RVCPU(comptime Tword: type) type {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
-                self.getRegister(parsed.rs1) + self.getRegister(parsed.rs2)
+                self.getRegister(parsed.rs1) +% self.getRegister(parsed.rs2)
             );
         }
 
         fn handleAddImmediate(self: *Self, instruction: u32) void {
             const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_signed = signExtend(Tword, parsed.imm);
             self.setRegister(
                 parsed.rd,
-                self.getRegister(parsed.rs1) + parsed.imm
+                self.getRegister(parsed.rs1) +% imm_signed
             );
         }
 
@@ -285,16 +358,6 @@ pub fn RVCPU(comptime Tword: type) type {
                 self.pc -%= imm;
             } else {
                 self.pc +%= imm;
-            }
-        }
-
-        fn handleCsrrs(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            if (parsed.rs1 == 0 and parsed.imm == 0xf14) {
-                self.setRegister(parsed.rd, 0);
-            } else {
-                std.debug.print("sveiki: 0x{X} 0x{X}\n", .{parsed.rs1, parsed.imm});
-                @panic("loool");
             }
         }
 
@@ -311,51 +374,12 @@ pub fn RVCPU(comptime Tword: type) type {
             }
         }
 
-        fn handleAuipc(self: *Self, instruction: u32) void {
-            const parsed: UTypeInstruction = @bitCast(instruction);
-            self.setRegister(
-                parsed.rd,
-                self.pc + (parsed.imm << 12)
-            );
-        }
-
-        fn handleCsrrw(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            _ = self;
-            std.debug.print("CSRRW values: {} {} 0x{X}\n", .{parsed.rd, parsed.rs1, parsed.imm});
-            std.debug.assert(parsed.rd == 0);
-            const allowed_imms = [_]u12{
-                0x305,
-                0x3b0,
-                0x3a0,
-                0x341
-            };
-            std.debug.assert(std.mem.containsAtLeastScalar(u12, &allowed_imms, 1, parsed.imm));
-            std.debug.print("Skipping write to vector\n", .{});
-        }
-
-        fn handleCsrrwi(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            _ = self;
-            std.debug.print("CSRRWI values: {} {} 0x{X}\n", .{parsed.rd, parsed.rs1, parsed.imm});
-            std.debug.assert(parsed.rd == 0);
-            const allowed_imms = [_]u12{
-                0x180,
-                0x744,
-                0x304,
-                0x302,
-                0x303,
-                0x300,
-            };
-            std.debug.assert(std.mem.containsAtLeastScalar(u12, &allowed_imms, 1, parsed.imm));
-            std.debug.print("Skipping write to vector\n", .{});
-        }
-
         fn handleLui(self: *Self, instruction: u32) void {
             const parsed: UTypeInstruction = @bitCast(instruction);
+            const imm: Tword = @intCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
-                parsed.imm << 12
+                imm << 12
             );
         }
 
@@ -370,6 +394,20 @@ pub fn RVCPU(comptime Tword: type) type {
                 parsed.rd,
                 (self.getRegister(parsed.rs1) << imm_split.shift_len)
             );
+        }
+
+        fn handleSrai(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: packed struct {
+                shift_len: u5,
+                id: u7,
+            } = @bitCast(parsed.imm);
+            std.debug.assert(imm_split.id == 0x20);
+            const src = self.getRegister(parsed.rs1);
+            const signed: toSigned(Tword) = @bitCast(src);
+            const shifted = signed >> imm_split.shift_len;
+            const result: Tword = @bitCast(shifted);
+            self.setRegister(parsed.rd, result);
         }
 
         fn handleBne(self: *Self, instruction: u32) void {
