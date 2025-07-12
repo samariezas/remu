@@ -90,11 +90,13 @@ fn InstructionDescriptor(comptime Tword: type) type {
         const Self = @This();
 
         fn print(self: *const Self, writer: std.io.AnyWriter, instruction: u32) !void {
+            std.debug.assert((instruction & 0x7f) == self.opcode);
             if (self.writer_fn) |writer_fn| {
-                std.debug.assert((instruction & 0x7f) == self.opcode);
                 try writer.print("{s} ", .{self.name});
                 try writer_fn(writer, instruction);
                 try writer.writeAll("\n");
+            } else {
+                try writer.print("{s} ???\n", .{self.name});
             }
         }
 
@@ -177,7 +179,15 @@ const STypeInstruction = packed struct {
     imm2: u7,
 
     fn getImm(self: *const STypeInstruction) u12 {
-        return self.imm1 | (self.imm2 >> 5);
+        const imm1: u12 = @intCast(self.imm1);
+        const imm2: u12 = @intCast(self.imm2);
+        return imm1 | (imm2 << 5);
+    }
+
+    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
+        const decoded: @This() = @bitCast(instruction);
+        const signed: i12 = @bitCast(decoded.getImm());
+        try writer.print("x{}, {}(x{})", .{decoded.rs2, signed, decoded.rs1});
     }
 };
 
@@ -273,6 +283,14 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, null, true),
             Instr.makeF37("SUB", 0b0110011, 0, 0x20, handleSub, RTypeInstruction.write, true),
+            Instr.makeF3("SB", 0b0100011, 0, handleSb, STypeInstruction.write, true),
+            Instr.makeF3("SH", 0b0100011, 1, handleSh, STypeInstruction.write, true),
+            Instr.makeF3("SW", 0b0100011, 2, handleSw, STypeInstruction.write, true),
+            Instr.makeF3("LB", 0b0000011, 0, handleLb, ITypeInstruction.write, true),
+            Instr.makeF3("LH", 0b0000011, 1, handleLh, ITypeInstruction.write, true),
+            Instr.makeF3("LW", 0b0000011, 2, handleLw, ITypeInstruction.write, true),
+            // Instr.makeF3("SH", 0b0110011, 1, handleSh, null, true),
+            // Instr.makeF3("SW", 0b0110011, 2, handleSw, null, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -463,6 +481,55 @@ pub fn RVCPU(comptime Tword: type) type {
                 parsed.rd,
                 self.pc +% (imm_word << 12)
             );
+        }
+
+        fn genericStoreHandler(self: *Self, T: type, instruction: u32) void {
+            const bitcnt = @typeInfo(T).int.bits;
+            const parsed: STypeInstruction = @bitCast(instruction);
+            const imm_extended = signExtend(Tword, parsed.getImm());
+            const address = self.getRegister(parsed.rs1) +% imm_extended;
+            var to_write: [@typeInfo(Tword).int.bits/8]u8 = undefined;
+            std.mem.writeInt(Tword, &to_write, self.getRegister(parsed.rs2), LittleEndian);
+            // TODO: proper errors
+            self.bus.writeMemory(address, to_write[0..(bitcnt/8)]) catch @panic("Cannot write");
+        }
+
+        fn genericLoadHandler(self: *Self, T: type, instruction: u32) void {
+            const bitcnt = @typeInfo(T).int.bits;
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_extended = signExtend(Tword, parsed.imm);
+            const address = self.getRegister(parsed.rs1) +% imm_extended;
+            var bytes_read: [bitcnt/8]u8 = undefined;
+            // TODO: proper errors
+            self.bus.readMemory(address, &bytes_read) catch @panic("Cannot write");
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, std.mem.readInt(T, &bytes_read, LittleEndian))
+            );
+        }
+
+        fn handleSb(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u8, instruction);
+        }
+
+        fn handleSh(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u16, instruction);
+        }
+
+        fn handleSw(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u32, instruction);
+        }
+
+        fn handleLb(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u8, instruction);
+        }
+
+        fn handleLh(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u16, instruction);
+        }
+
+        fn handleLw(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u32, instruction);
         }
 
         pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
