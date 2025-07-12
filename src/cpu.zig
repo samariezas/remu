@@ -300,6 +300,9 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("ANDI", 0b0010011, 7, handleAndi, ITypeInstruction.write, true),
             Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
             Instr.makeF3("XORI", 0b0010011, 4, handleXori, RTypeInstruction.write, true),
+            Instr.makeF37("SLL", 0b0110011, 1, 0, handleSll, null, true),
+            Instr.makeF37("SRL", 0b0110011, 5, 0, handleSrl, null, true),
+            Instr.makeF37("SRA", 0b0110011, 5, 0x20, handleSra, null, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -623,6 +626,35 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) ^ self.getRegister(parsed.rs2)
+            );
+        }
+
+        fn handleSll(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) << shift_len
+            );
+        }
+
+        fn handleSrl(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) >> shift_len
+            );
+        }
+
+        fn handleSra(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            const src_signed: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const result_signed = src_signed >> shift_len;
+            self.setRegister(
+                parsed.rd,
+                @bitCast(result_signed)
             );
         }
 
