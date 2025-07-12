@@ -28,6 +28,10 @@ pub fn runSingle(allocator: std.mem.Allocator, image: []const u8) !void {
     }
 }
 
+fn stringCmp(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
+}
+
 fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -40,6 +44,7 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8) !
     var total_tests: usize = 0;
     var passed_tests: usize = 0;
 
+    var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
     for (items) |i| {
         const pid = linux.fork();
         if (pid == 0) {
@@ -79,11 +84,19 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8) !
             std.debug.print("t={s}, stat={}\n", .{i, exit_status});
             if (exit_status == 0) {
                 passed_tests += 1;
+            } else {
+                try failed_tests.append(i);
             }
         }
         total_tests += 1;
     }
 
+    std.debug.print("------------------------------\nFailed tests:\n", .{});
+    std.mem.sort([]const u8, failed_tests.items, {}, stringCmp);
+    for (failed_tests.items) |i| {
+        std.debug.print("{s}\n", .{i});
+    }
+    std.debug.print("------------------------------\n", .{});
     std.debug.print("Test summary: {}/{}\n", .{passed_tests, total_tests});
 
     if (passed_tests != total_tests) {
