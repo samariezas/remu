@@ -91,12 +91,14 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8) !
         total_tests += 1;
     }
 
-    std.debug.print("------------------------------\nFailed tests:\n", .{});
-    std.mem.sort([]const u8, failed_tests.items, {}, stringCmp);
-    for (failed_tests.items) |i| {
-        std.debug.print("{s}\n", .{i});
+    if (failed_tests.items.len != 0) {
+        std.debug.print("------------------------------\nFailed tests:\n", .{});
+        std.mem.sort([]const u8, failed_tests.items, {}, stringCmp);
+        for (failed_tests.items) |i| {
+            std.debug.print("{s}\n", .{i});
+        }
+        std.debug.print("------------------------------\n", .{});
     }
-    std.debug.print("------------------------------\n", .{});
     std.debug.print("Test summary: {}/{}\n", .{passed_tests, total_tests});
 
     if (passed_tests != total_tests) {

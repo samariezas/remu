@@ -307,6 +307,8 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF37("SLTU", 0b0110011, 3, 0, handleSltu, null, true),
             Instr.makeF3("SLTI", 0b0010011, 2, handleSlti, null, true),
             Instr.makeF3("SLTIU", 0b0010011, 3, handleSltiu, null, true),
+            Instr.makeF3("FENCE", 0b0001111, 0, handleNop, null, true),
+            Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop, null, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -701,6 +703,8 @@ pub fn RVCPU(comptime Tword: type) type {
                 if (rs1 < imm) 1 else 0
             );
         }
+
+        fn handleNop(_: *Self, _: u32) void { }
 
         pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
             try self.bus.writeMemory(entrypoint, buffer);
