@@ -271,6 +271,8 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("BLT", 0b1100011, 4, handleBlt, null, false),
             Instr.makeF3("ECALL", 0b1110011, 0, handleEcall, null, false),
             Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
+            Instr.makeNone("AUIPC", 0b0010111, handleAuipc, null, true),
+            Instr.makeF37("SUB", 0b0110011, 0, 0x20, handleSub, RTypeInstruction.write, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -338,6 +340,14 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) +% self.getRegister(parsed.rs2)
+            );
+        }
+
+        fn handleSub(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) -% self.getRegister(parsed.rs2)
             );
         }
 
@@ -443,6 +453,15 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) | parsed.imm
+            );
+        }
+
+        fn handleAuipc(self: *Self, instruction: u32) void {
+            const parsed: UTypeInstruction = @bitCast(instruction);
+            const imm_word: Tword = @intCast(parsed.imm);
+            self.setRegister(
+                parsed.rd,
+                self.pc +% (imm_word << 12)
             );
         }
 
