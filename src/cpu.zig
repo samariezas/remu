@@ -200,19 +200,18 @@ const JTypeInstruction = packed struct {
     imm3: u10,
     imm4: u1,
 
-    fn getSign(self: *const JTypeInstruction) bool {
-        return self.imm4 == 1;
-    }
-
-    fn getImm(self: *const JTypeInstruction) u21 {
+    fn getImm(self: *const JTypeInstruction, Tword: type) Tword {
         const imm1: u21 = @intCast(self.imm1);
         const imm2: u21 = @intCast(self.imm2);
         const imm3: u21 = @intCast(self.imm3);
-        return (
+        const imm4: u21 = @intCast(self.imm3);
+        const retval = (
             (imm1 << 12) |       
             (imm2 << 11) |
-            (imm3 << 1)
+            (imm3 << 1)  |
+            (imm4 << 20)
         );
+        return signExtend(Tword, retval);
     }
 
     fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
@@ -234,17 +233,18 @@ const BTypeInstruction = packed struct {
     imm3: u6,
     imm4: u1,
 
-    fn getImm(self: *const BTypeInstruction) u13 {
+    fn getImm(self: *const BTypeInstruction, Tword: type) Tword {
         const imm1: u13 = @intCast(self.imm1);
         const imm2: u13 = @intCast(self.imm2);
         const imm3: u13 = @intCast(self.imm3);
         const imm4: u13 = @intCast(self.imm4);
-        return (
+        const retval = (
             (imm1 << 11) |
             (imm2 << 1) |
             (imm3 << 5) |
             (imm4 << 12)
         );
+        return signExtend(Tword, retval);
     }
 };
 
@@ -353,17 +353,13 @@ pub fn RVCPU(comptime Tword: type) type {
         fn handleJump(self: *Self, instruction: u32) void {
             const parsed: JTypeInstruction = @bitCast(instruction);
             self.setRegister(parsed.rd, self.pc + 4);
-            const imm = parsed.getImm();
-            if (parsed.getSign()) {
-                self.pc -%= imm;
-            } else {
-                self.pc +%= imm;
-            }
+            const imm = parsed.getImm(Tword);
+            self.pc +%= imm;
         }
 
         fn handleBlt(self: *Self, instruction: u32) void {
             const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm();
+            const imm = parsed.getImm(Tword);
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
             std.debug.print("Imm: {}\n", .{imm});
@@ -412,9 +408,9 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleBne(self: *Self, instruction: u32) void {
             const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm();
+            const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) != self.getRegister(parsed.rs2)) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
                 self.pc += 4;
             }
@@ -422,9 +418,9 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleBeq(self: *Self, instruction: u32) void {
             const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm();
+            const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) == self.getRegister(parsed.rs2)) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
                 self.pc += 4;
             }
