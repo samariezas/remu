@@ -303,6 +303,10 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF37("SLL", 0b0110011, 1, 0, handleSll, null, true),
             Instr.makeF37("SRL", 0b0110011, 5, 0, handleSrl, null, true),
             Instr.makeF37("SRA", 0b0110011, 5, 0x20, handleSra, null, true),
+            Instr.makeF37("SLT", 0b0110011, 2, 0, handleSlt, null, true),
+            Instr.makeF37("SLTU", 0b0110011, 3, 0, handleSltu, null, true),
+            Instr.makeF3("SLTI", 0b0010011, 2, handleSlti, null, true),
+            Instr.makeF3("SLTIU", 0b0010011, 3, handleSltiu, null, true),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -655,6 +659,46 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 @bitCast(result_signed)
+            );
+        }
+
+        fn handleSlt(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const rs1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const rs2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                if (rs1 < rs2) 1 else 0
+            );
+        }
+
+        fn handleSltu(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const rs1 = self.getRegister(parsed.rs1);
+            const rs2 = self.getRegister(parsed.rs2);
+            self.setRegister(
+                parsed.rd,
+                if (rs1 < rs2) 1 else 0
+            );
+        }
+
+        fn handleSlti(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const rs1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const imm: toSigned(Tword) = @bitCast(signExtend(Tword, parsed.imm));
+            self.setRegister(
+                parsed.rd,
+                if (rs1 < imm) 1 else 0
+            );
+        }
+
+        fn handleSltiu(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const rs1 = self.getRegister(parsed.rs1);
+            const imm: Tword = @bitCast(signExtend(Tword, parsed.imm));
+            self.setRegister(
+                parsed.rd,
+                if (rs1 < imm) 1 else 0
             );
         }
 
