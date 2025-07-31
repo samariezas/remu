@@ -23,8 +23,24 @@ pub fn runSingle(allocator: std.mem.Allocator, image: []const u8) !void {
 
     try rvcpu.loadBinary(entrypoint, file_read);
 
-    while (true) {
+    while (!rvcpu.isHalted()) {
         try rvcpu.tick();
+    }
+
+    // TODO: refactor out cwd
+    if (try tests.loadSignature(allocator, image, cwd)) |signature| {
+        defer allocator.free(signature);
+        const our_signature = try rvcpu.getSignature(allocator);
+        defer allocator.free(our_signature);
+        if (!std.mem.eql(u8, signature, our_signature)) {
+            std.debug.print("Our    signature: {s}\n", .{std.fmt.fmtSliceHexLower(our_signature)});
+            std.debug.print("Golden signature: {s}\n", .{std.fmt.fmtSliceHexLower(signature)});
+            return error.SignatureMismatch;
+        } else {
+            std.debug.print("Signatures match\n", .{});
+        }
+    } else {
+        std.debug.print("No signature needed\n", .{});
     }
 }
 
@@ -74,8 +90,13 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8) !
 
             try std.posix.dup2(null_file.handle, std.io.getStdOut().handle);
             try std.posix.dup2(null_file.handle, std.io.getStdErr().handle);
-            while (true) {
+            while (!rvcpu.isHalted()) {
                 try rvcpu.tick();
+            }
+
+            if (try tests.loadSignature(allocator, i, dest_dir)) |signature| {
+                defer allocator.free(signature);
+                // defer signature.deinit();
             }
         } else {
             var status: u32 = 0;
