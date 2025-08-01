@@ -281,6 +281,7 @@ pub fn RVCPU(comptime Tword: type) type {
         pc: Tword,
         bus: Bus(Tword),
         test_result: ?TestResult(Tword),
+        writer: std.io.AnyWriter,
 
         const Self = @This();
 
@@ -364,19 +365,17 @@ pub fn RVCPU(comptime Tword: type) type {
             std.debug.assert(self.registers[0] == 0);
             const instruction = try self.getNextInstruction();
             const instruction_id: InstructionIdentifiers = @bitCast(instruction);
-            std.debug.print("Instruction: PC=0x{x:0>8} Instr=0x{x:0>8}\n", .{self.pc, instruction});
-            std.debug.print("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
-            const stderr = std.io.getStdErr();
-            const writer = stderr.writer().any();
+            try self.writer.print("Instruction: PC=0x{x:0>8} Instr=0x{x:0>8}\n", .{self.pc, instruction});
+            try self.writer.print("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
             for (instructions) |i| {
                 if (matches(instruction_id, &i)) {
-                    try i.print(writer, instruction);
+                    try i.print(self.writer, instruction);
                     i.handler(self, instruction);
-                    try self.writeRegisters(writer, 4);
+                    try self.writeRegisters(self.writer, 4);
                     if (i.advance_pc) {
                         self.pc += 4;
                     }
-                    std.debug.print("\n", .{});
+                    try self.writer.writeAll("\n");
                     return;
                 }
             }
@@ -540,14 +539,6 @@ pub fn RVCPU(comptime Tword: type) type {
                     .length = memory_end - memory_start,
                 },
             };
-            // std.debug.print("Data length: 0x{x:0>8} to 0x{x:0>8}\n", .{memory_start, memory_end});
-            // if (a0_val != 0) {
-            //     std.debug.print("Failed testcase #{}\n", .{a0_val / 2});
-            //     std.process.exit(1);
-            // } else {
-            //     std.debug.print("all gucci\n", .{});
-            //     std.process.exit(0);
-            // }
         }
 
         fn handleAndi(self: *Self, instruction: u32) void {
@@ -738,13 +729,14 @@ pub fn RVCPU(comptime Tword: type) type {
             try self.bus.writeMemory(entrypoint, buffer);
         }
 
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword) !RVCPU(Tword) {
+        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(Tword) {
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
                 .pc = memory_start,
                 .bus = try Bus(Tword).init(allocator, memory_start, memory_length),
                 .test_result = null,
+                .writer = writer,
             };
         }
 
