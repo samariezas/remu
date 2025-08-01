@@ -499,11 +499,15 @@ pub fn RVCPU(comptime Tword: type) type {
                 shift_len: u5,
                 id: u7,
             } = @bitCast(parsed.imm);
-            std.debug.assert(imm_split.id == 0x20);
             const src = self.getRegister(parsed.rs1);
-            const signed: toSigned(Tword) = @bitCast(src);
-            const shifted = signed >> imm_split.shift_len;
-            const result: Tword = @bitCast(shifted);
+            var result: Tword = undefined;
+            if (imm_split.id == 0x20) { // shift arithmetic
+                const signed: toSigned(Tword) = @bitCast(src);
+                const shifted = signed >> imm_split.shift_len;
+                result = @bitCast(shifted);
+            } else if (imm_split.id == 0x00) { // shift logical
+                result = src >> imm_split.shift_len;
+            } else unreachable;
             self.setRegister(parsed.rd, result);
         }
 
