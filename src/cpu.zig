@@ -433,9 +433,9 @@ pub fn RVCPU(comptime Tword: type) type {
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
             if (reg1 < reg2) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
-                self.pc += 4;
+                self.pc +%= 4;
             }
         }
 
@@ -445,9 +445,9 @@ pub fn RVCPU(comptime Tword: type) type {
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
             if (reg1 >= reg2) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
-                self.pc += 4;
+                self.pc +%= 4;
             }
         }
 
@@ -455,9 +455,9 @@ pub fn RVCPU(comptime Tword: type) type {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) < self.getRegister(parsed.rs2)) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
-                self.pc += 4;
+                self.pc +%= 4;
             }
         }
 
@@ -465,9 +465,9 @@ pub fn RVCPU(comptime Tword: type) type {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) >= self.getRegister(parsed.rs2)) {
-                self.pc += imm;
+                self.pc +%= imm;
             } else {
-                self.pc += 4;
+                self.pc +%= 4;
             }
         }
 
