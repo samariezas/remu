@@ -307,14 +307,15 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF37("SLTU", 0b0110011, 3,    0, handleSltu, RTypeInstruction.write),
 
             // I-type arithmetic/logic
-            Instr.makeF3("ADDI",  0b0010011, 0, handleAddi,  ITypeInstruction.write),
-            Instr.makeF3("XORI",  0b0010011, 4, handleXori,  ITypeInstruction.write),
-            Instr.makeF3("ORI",   0b0010011, 6, handleOri,   ITypeInstruction.write),
-            Instr.makeF3("ANDI",  0b0010011, 7, handleAndi,  ITypeInstruction.write),
-            Instr.makeF3("SLLI",  0b0010011, 1, handleSlli,  ITypeInstruction.write),
-            Instr.makeF3("SRAI",  0b0010011, 5, handleSrai,  ITypeInstruction.write),
-            Instr.makeF3("SLTI",  0b0010011, 2, handleSlti,  ITypeInstruction.write),
-            Instr.makeF3("SLTIU", 0b0010011, 3, handleSltiu, ITypeInstruction.write),
+            Instr.makeF3("ADDI",   0b0010011, 0,       handleAddi,  ITypeInstruction.write),
+            Instr.makeF3("XORI",   0b0010011, 4,       handleXori,  ITypeInstruction.write),
+            Instr.makeF3("ORI",    0b0010011, 6,       handleOri,   ITypeInstruction.write),
+            Instr.makeF3("ANDI",   0b0010011, 7,       handleAndi,  ITypeInstruction.write),
+            Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
+            Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
+            Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+            Instr.makeF3("SLTI",   0b0010011, 2,       handleSlti,  ITypeInstruction.write),
+            Instr.makeF3("SLTIU",  0b0010011, 3,       handleSltiu, ITypeInstruction.write),
 
             // I-type loads
             Instr.makeF3("LB",  0b0000011, 0, handleLb,  ITypeInstruction.write),
@@ -576,21 +577,19 @@ pub fn RVCPU(comptime Tword: type) type {
             );
         }
 
-        fn handleSrai(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_split: packed struct {
-                shift_len: u5,
-                id: u7,
-            } = @bitCast(parsed.imm);
+        fn handleSrli(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
             const src = self.getRegister(parsed.rs1);
-            var result: Tword = undefined;
-            if (imm_split.id == 0x20) { // shift arithmetic
-                const signed: toSigned(Tword) = @bitCast(src);
-                const shifted = signed >> imm_split.shift_len;
-                result = @bitCast(shifted);
-            } else if (imm_split.id == 0x00) { // shift logical
-                result = src >> imm_split.shift_len;
-            } else unreachable;
+            const result = src >> parsed.rs2;
+            self.setRegister(parsed.rd, result);
+        }
+
+        fn handleSrai(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const src = self.getRegister(parsed.rs1);
+            const signed: toSigned(Tword) = @bitCast(src);
+            const shifted = signed >> parsed.rs2;
+            const result: Tword = @bitCast(shifted);
             self.setRegister(parsed.rd, result);
         }
 
