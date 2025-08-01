@@ -100,37 +100,43 @@ fn InstructionDescriptor(comptime Tword: type) type {
             }
         }
 
-        fn makeNone(name: []const u8, opcode: u7, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+        fn makeNone(name: []const u8, opcode: u7, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
             return .{
                 .opcode = opcode,
                 .id = InstructionID.none,
                 .handler = handler,
                 .name = name,
-                .advance_pc = advance_pc,
+                .advance_pc = true,
                 .writer_fn = writer_fn,
             };
         }
 
-        fn makeF3(name: []const u8, opcode: u7, funct3: u3, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+        fn makeF3(name: []const u8, opcode: u7, funct3: u3, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
             return .{
                 .opcode = opcode,
                 .id = InstructionID { .funct_3 = .{ .funct3 = funct3 } },
                 .handler = handler,
                 .name = name,
-                .advance_pc = advance_pc,
+                .advance_pc = true,
                 .writer_fn = writer_fn,
             };
         }
 
-        fn makeF37(name: []const u8, opcode: u7, funct3: u3, funct7: u7, handler: InstructionHandler, writer_fn: ?WriterHandler, advance_pc: bool) Self {
+        fn makeF37(name: []const u8, opcode: u7, funct3: u3, funct7: u7, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
             return .{
                 .opcode = opcode,
                 .id = InstructionID { .funct_3_7 = .{ .funct3 = funct3, .funct7 = funct7 } },
                 .handler = handler,
                 .name = name,
-                .advance_pc = advance_pc,
+                .advance_pc = true,
                 .writer_fn = writer_fn,
             };
+        }
+
+        fn noJump(self: Self) Self {
+            var new = self;
+            new.advance_pc = false;
+            return new;
         }
     };
 }
@@ -288,45 +294,60 @@ pub fn RVCPU(comptime Tword: type) type {
         const Instr = InstructionDescriptor(Tword);
 
         const instructions = [_]Instr {
-            Instr.makeF37("ADD", 0b0110011, 0, 0, handleAdd, RTypeInstruction.write, true),
-            Instr.makeNone("JAL", 0b1101111, handleJump, null, false),
-            Instr.makeF3("JALR", 0b1100111, 0, handleJalr, null, false),
-            Instr.makeF3("ADDI", 0b0010011, 0, handleAddImmediate, ITypeInstruction.write, true),
-            Instr.makeF3("BNE", 0b1100011, 1, handleBne, null, false),
-            Instr.makeF3("BEQ", 0b1100011, 0, handleBeq, null, false),
-            Instr.makeNone("LUI", 0b0110111, handleLui, UTypeInstruction.write, true),
-            Instr.makeF3("SLLI", 0b0010011, 1, handleSlli, null, true),
-            Instr.makeF3("SRAI", 0b0010011, 5, handleSrai, null, true),
-            Instr.makeF3("BLT", 0b1100011, 4, handleBlt, null, false),
-            Instr.makeF3("BGE", 0b1100011, 5, handleBge, null, false),
-            Instr.makeF3("BLTU", 0b1100011, 6, handleBltu, null, false),
-            Instr.makeF3("BGEU", 0b1100011, 7, handleBgeu, null, false),
-            Instr.makeF3("ECALL", 0b1110011, 0, handleEcall, null, false),
-            Instr.makeNone("AUIPC", 0b0010111, handleAuipc, null, true),
-            Instr.makeF37("SUB", 0b0110011, 0, 0x20, handleSub, RTypeInstruction.write, true),
-            Instr.makeF3("SB", 0b0100011, 0, handleSb, STypeInstruction.write, true),
-            Instr.makeF3("SH", 0b0100011, 1, handleSh, STypeInstruction.write, true),
-            Instr.makeF3("SW", 0b0100011, 2, handleSw, STypeInstruction.write, true),
-            Instr.makeF3("LB", 0b0000011, 0, handleLb, ITypeInstruction.write, true),
-            Instr.makeF3("LH", 0b0000011, 1, handleLh, ITypeInstruction.write, true),
-            Instr.makeF3("LW", 0b0000011, 2, handleLw, ITypeInstruction.write, true),
-            Instr.makeF3("LBU", 0b0000011, 4, handleLbu, ITypeInstruction.write, true),
-            Instr.makeF3("LHU", 0b0000011, 5, handleLhu, ITypeInstruction.write, true),
-            Instr.makeF37("AND", 0b0110011, 7, 0, handleAnd, RTypeInstruction.write, true),
-            Instr.makeF37("OR", 0b0110011, 6, 0, handleOr, RTypeInstruction.write, true),
-            Instr.makeF37("XOR", 0b0110011, 4, 0, handleXor, RTypeInstruction.write, true),
-            Instr.makeF3("ANDI", 0b0010011, 7, handleAndi, ITypeInstruction.write, true),
-            Instr.makeF3("ORI", 0b0010011, 6, handleOri, null, true),
-            Instr.makeF3("XORI", 0b0010011, 4, handleXori, RTypeInstruction.write, true),
-            Instr.makeF37("SLL", 0b0110011, 1, 0, handleSll, null, true),
-            Instr.makeF37("SRL", 0b0110011, 5, 0, handleSrl, null, true),
-            Instr.makeF37("SRA", 0b0110011, 5, 0x20, handleSra, null, true),
-            Instr.makeF37("SLT", 0b0110011, 2, 0, handleSlt, null, true),
-            Instr.makeF37("SLTU", 0b0110011, 3, 0, handleSltu, null, true),
-            Instr.makeF3("SLTI", 0b0010011, 2, handleSlti, null, true),
-            Instr.makeF3("SLTIU", 0b0010011, 3, handleSltiu, null, true),
-            Instr.makeF3("FENCE", 0b0001111, 0, handleNop, null, true),
-            Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop, null, true),
+            // R-type arithmetic/logic
+            Instr.makeF37("ADD",  0b0110011, 0,    0, handleAdd,  RTypeInstruction.write),
+            Instr.makeF37("SUB",  0b0110011, 0, 0x20, handleSub,  RTypeInstruction.write),
+            Instr.makeF37("XOR",  0b0110011, 4,    0, handleXor,  RTypeInstruction.write),
+            Instr.makeF37("OR",   0b0110011, 6,    0, handleOr,   RTypeInstruction.write),
+            Instr.makeF37("AND",  0b0110011, 7,    0, handleAnd,  RTypeInstruction.write),
+            Instr.makeF37("SLL",  0b0110011, 1,    0, handleSll,  RTypeInstruction.write),
+            Instr.makeF37("SRL",  0b0110011, 5,    0, handleSrl,  RTypeInstruction.write),
+            Instr.makeF37("SRA",  0b0110011, 5, 0x20, handleSra,  RTypeInstruction.write),
+            Instr.makeF37("SLT",  0b0110011, 2,    0, handleSlt,  RTypeInstruction.write),
+            Instr.makeF37("SLTU", 0b0110011, 3,    0, handleSltu, RTypeInstruction.write),
+
+            // I-type arithmetic/logic
+            Instr.makeF3("ADDI",  0b0010011, 0, handleAddi,  ITypeInstruction.write),
+            Instr.makeF3("XORI",  0b0010011, 4, handleXori,  ITypeInstruction.write),
+            Instr.makeF3("ORI",   0b0010011, 6, handleOri,   ITypeInstruction.write),
+            Instr.makeF3("ANDI",  0b0010011, 7, handleAndi,  ITypeInstruction.write),
+            Instr.makeF3("SLLI",  0b0010011, 1, handleSlli,  ITypeInstruction.write),
+            Instr.makeF3("SRAI",  0b0010011, 5, handleSrai,  ITypeInstruction.write),
+            Instr.makeF3("SLTI",  0b0010011, 2, handleSlti,  ITypeInstruction.write),
+            Instr.makeF3("SLTIU", 0b0010011, 3, handleSltiu, ITypeInstruction.write),
+
+            // I-type loads
+            Instr.makeF3("LB",  0b0000011, 0, handleLb,  ITypeInstruction.write),
+            Instr.makeF3("LH",  0b0000011, 1, handleLh,  ITypeInstruction.write),
+            Instr.makeF3("LW",  0b0000011, 2, handleLw,  ITypeInstruction.write),
+            Instr.makeF3("LBU", 0b0000011, 4, handleLbu, ITypeInstruction.write),
+            Instr.makeF3("LHU", 0b0000011, 5, handleLhu, ITypeInstruction.write),
+
+            // S-type stores
+            Instr.makeF3("SB", 0b0100011, 0, handleSb, STypeInstruction.write),
+            Instr.makeF3("SH", 0b0100011, 1, handleSh, STypeInstruction.write),
+            Instr.makeF3("SW", 0b0100011, 2, handleSw, STypeInstruction.write),
+
+            // B-type branches
+            Instr.makeF3("BEQ",  0b1100011, 0, handleBeq,  null).noJump(),
+            Instr.makeF3("BNE",  0b1100011, 1, handleBne,  null).noJump(),
+            Instr.makeF3("BLT",  0b1100011, 4, handleBlt,  null).noJump(),
+            Instr.makeF3("BGE",  0b1100011, 5, handleBge,  null).noJump(),
+            Instr.makeF3("BLTU", 0b1100011, 6, handleBltu, null).noJump(),
+            Instr.makeF3("BGEU", 0b1100011, 7, handleBgeu, null).noJump(),
+
+            // Jumps
+            Instr.makeNone("JAL", 0b1101111, handleJal, null).noJump(),
+            Instr.makeF3("JALR", 0b1100111, 0, handleJalr, null).noJump(),
+
+            // U-type loads
+            Instr.makeNone("LUI",   0b0110111, handleLui,   UTypeInstruction.write),
+            Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UTypeInstruction.write),
+
+            // Misc
+            Instr.makeF3("ECALL",   0b1110011, 0, handleEcall, null).noJump(),
+            Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
+            Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -388,6 +409,38 @@ pub fn RVCPU(comptime Tword: type) type {
             return std.mem.readInt(u32, &bytes, LittleEndian);
         }
 
+
+        pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
+            try self.bus.writeMemory(entrypoint, buffer);
+        }
+
+        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(Tword) {
+            return .{
+                .allocator = allocator,
+                .registers = std.mem.zeroes([32]Tword),
+                .pc = memory_start,
+                .bus = try Bus(Tword).init(allocator, memory_start, memory_length),
+                .test_result = null,
+                .writer = writer,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.bus.deinit(self.allocator);
+        }
+
+        pub fn isHalted(self: *Self) bool {
+            return self.test_result != null;
+        }
+
+        pub fn getSignature(self: *Self, allocator: Allocator) ![]u8 {
+            std.debug.assert(self.isHalted());
+            const signature = self.test_result.?.signature_address.?;
+            const buffer: []u8 = try allocator.alloc(u8, @intCast(signature.length));
+            try self.bus.readMemory(signature.start, buffer);
+            return buffer;
+        }
+
         fn handleAdd(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
@@ -404,241 +457,11 @@ pub fn RVCPU(comptime Tword: type) type {
             );
         }
 
-        fn handleAddImmediate(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_signed = signExtend(Tword, parsed.imm);
-            self.setRegister(
-                parsed.rd,
-                self.getRegister(parsed.rs1) +% imm_signed
-            );
-        }
-
-        fn handleJump(self: *Self, instruction: u32) void {
-            const parsed: JTypeInstruction = @bitCast(instruction);
-            self.setRegister(parsed.rd, self.pc + 4);
-            const imm = parsed.getImm(Tword);
-            self.pc +%= imm;
-        }
-
-        fn handleJalr(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const new_pc = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
-            self.setRegister(parsed.rd, self.pc + 4);
-            self.pc = new_pc;
-        }
-
-        fn handleBlt(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
-            const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
-            if (reg1 < reg2) {
-                self.pc +%= imm;
-            } else {
-                self.pc +%= 4;
-            }
-        }
-
-        fn handleBge(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
-            const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
-            if (reg1 >= reg2) {
-                self.pc +%= imm;
-            } else {
-                self.pc +%= 4;
-            }
-        }
-
-        fn handleBltu(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            if (self.getRegister(parsed.rs1) < self.getRegister(parsed.rs2)) {
-                self.pc +%= imm;
-            } else {
-                self.pc +%= 4;
-            }
-        }
-
-        fn handleBgeu(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            if (self.getRegister(parsed.rs1) >= self.getRegister(parsed.rs2)) {
-                self.pc +%= imm;
-            } else {
-                self.pc +%= 4;
-            }
-        }
-
-        fn handleLui(self: *Self, instruction: u32) void {
-            const parsed: UTypeInstruction = @bitCast(instruction);
-            const imm: Tword = @intCast(parsed.imm);
-            self.setRegister(
-                parsed.rd,
-                imm << 12
-            );
-        }
-
-        fn handleSlli(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_split: packed struct {
-                shift_len: u5,
-                id: u7,
-            } = @bitCast(parsed.imm);
-            std.debug.assert(imm_split.id == 0);
-            self.setRegister(
-                parsed.rd,
-                (self.getRegister(parsed.rs1) << imm_split.shift_len)
-            );
-        }
-
-        fn handleSrai(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_split: packed struct {
-                shift_len: u5,
-                id: u7,
-            } = @bitCast(parsed.imm);
-            const src = self.getRegister(parsed.rs1);
-            var result: Tword = undefined;
-            if (imm_split.id == 0x20) { // shift arithmetic
-                const signed: toSigned(Tword) = @bitCast(src);
-                const shifted = signed >> imm_split.shift_len;
-                result = @bitCast(shifted);
-            } else if (imm_split.id == 0x00) { // shift logical
-                result = src >> imm_split.shift_len;
-            } else unreachable;
-            self.setRegister(parsed.rd, result);
-        }
-
-        fn handleBne(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            if (self.getRegister(parsed.rs1) != self.getRegister(parsed.rs2)) {
-                self.pc +%= imm;
-            } else {
-                self.pc += 4;
-            }
-        }
-
-        fn handleBeq(self: *Self, instruction: u32) void {
-            const parsed: BTypeInstruction = @bitCast(instruction);
-            const imm = parsed.getImm(Tword);
-            if (self.getRegister(parsed.rs1) == self.getRegister(parsed.rs2)) {
-                self.pc +%= imm;
-            } else {
-                self.pc += 4;
-            }
-        }
-
-        fn handleEcall(self: *Self, instruction: u32) void {
-            _ = instruction;
-            std.debug.assert(!self.isHalted());
-            const memory_start = self.getRegister(11);
-            const memory_end = self.getRegister(12);
-            self.test_result = TestResult(Tword) {
-                .a0 = self.getRegister(10),
-                .signature_address = if (memory_start == memory_end) null else .{
-                    .start = memory_start,
-                    .length = memory_end - memory_start,
-                },
-            };
-        }
-
-        fn handleAndi(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            self.setRegister(
-                parsed.rd,
-                self.getRegister(parsed.rs1) & signExtend(Tword, parsed.imm)
-            );
-        }
-
-        fn handleOri(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            self.setRegister(
-                parsed.rd,
-                self.getRegister(parsed.rs1) | signExtend(Tword, parsed.imm)
-            );
-        }
-
-        fn handleXori(self: *Self, instruction: u32) void {
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            self.setRegister(
-                parsed.rd,
-                self.getRegister(parsed.rs1) ^ signExtend(Tword, parsed.imm)
-            );
-        }
-
-        fn handleAuipc(self: *Self, instruction: u32) void {
-            const parsed: UTypeInstruction = @bitCast(instruction);
-            const imm_word: Tword = @intCast(parsed.imm);
-            self.setRegister(
-                parsed.rd,
-                self.pc +% (imm_word << 12)
-            );
-        }
-
-        fn genericStoreHandler(self: *Self, T: type, instruction: u32) void {
-            const bitcnt = @typeInfo(T).int.bits;
-            const parsed: STypeInstruction = @bitCast(instruction);
-            const imm_extended = signExtend(Tword, parsed.getImm());
-            const address = self.getRegister(parsed.rs1) +% imm_extended;
-            var to_write: [@typeInfo(Tword).int.bits/8]u8 = undefined;
-            std.mem.writeInt(Tword, &to_write, self.getRegister(parsed.rs2), LittleEndian);
-            // TODO: proper errors
-            self.bus.writeMemory(address, to_write[0..(bitcnt/8)]) catch @panic("Cannot write");
-        }
-
-        fn genericLoadHandler(self: *Self, T: type, instruction: u32, comptime sign_extend: bool) void {
-            const bitcnt = @typeInfo(T).int.bits;
-            const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_extended = signExtend(Tword, parsed.imm);
-            const address = self.getRegister(parsed.rs1) +% imm_extended;
-            var bytes_read: [bitcnt/8]u8 = undefined;
-            // TODO: proper errors
-            self.bus.readMemory(address, &bytes_read) catch @panic("Cannot write");
-            const read_memory: T = std.mem.readInt(T, &bytes_read, LittleEndian);
-            const result: Tword = if (sign_extend) signExtend(Tword, read_memory) else @intCast(read_memory);
-            self.setRegister(parsed.rd, result);
-        }
-
-        fn handleSb(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u8, instruction);
-        }
-
-        fn handleSh(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u16, instruction);
-        }
-
-        fn handleSw(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u32, instruction);
-        }
-
-        fn handleLb(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u8, instruction, true);
-        }
-
-        fn handleLh(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u16, instruction, true);
-        }
-
-        fn handleLw(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u32, instruction, true);
-        }
-
-        fn handleLbu(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u8, instruction, false);
-        }
-
-        fn handleLhu(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u16, instruction, false);
-        }
-
-        fn handleAnd(self: *Self, instruction: u32) void {
+        fn handleXor(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
-                self.getRegister(parsed.rs1) & self.getRegister(parsed.rs2)
+                self.getRegister(parsed.rs1) ^ self.getRegister(parsed.rs2)
             );
         }
 
@@ -650,11 +473,11 @@ pub fn RVCPU(comptime Tword: type) type {
             );
         }
 
-        fn handleXor(self: *Self, instruction: u32) void {
+        fn handleAnd(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
-                self.getRegister(parsed.rs1) ^ self.getRegister(parsed.rs2)
+                self.getRegister(parsed.rs1) & self.getRegister(parsed.rs2)
             );
         }
 
@@ -707,6 +530,70 @@ pub fn RVCPU(comptime Tword: type) type {
             );
         }
 
+        fn handleAddi(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_signed = signExtend(Tword, parsed.imm);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) +% imm_signed
+            );
+        }
+
+        fn handleXori(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) ^ signExtend(Tword, parsed.imm)
+            );
+        }
+
+        fn handleOri(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) | signExtend(Tword, parsed.imm)
+            );
+        }
+
+        fn handleAndi(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) & signExtend(Tword, parsed.imm)
+            );
+        }
+
+        fn handleSlli(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: packed struct {
+                shift_len: u5,
+                id: u7,
+            } = @bitCast(parsed.imm);
+            std.debug.assert(imm_split.id == 0);
+            self.setRegister(
+                parsed.rd,
+                (self.getRegister(parsed.rs1) << imm_split.shift_len)
+            );
+        }
+
+        fn handleSrai(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: packed struct {
+                shift_len: u5,
+                id: u7,
+            } = @bitCast(parsed.imm);
+            const src = self.getRegister(parsed.rs1);
+            var result: Tword = undefined;
+            if (imm_split.id == 0x20) { // shift arithmetic
+                const signed: toSigned(Tword) = @bitCast(src);
+                const shifted = signed >> imm_split.shift_len;
+                result = @bitCast(shifted);
+            } else if (imm_split.id == 0x00) { // shift logical
+                result = src >> imm_split.shift_len;
+            } else unreachable;
+            self.setRegister(parsed.rd, result);
+        }
+
         fn handleSlti(self: *Self, instruction: u32) void {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const rs1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
@@ -727,38 +614,173 @@ pub fn RVCPU(comptime Tword: type) type {
             );
         }
 
-        fn handleNop(_: *Self, _: u32) void { }
-
-        pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
-            try self.bus.writeMemory(entrypoint, buffer);
+        fn genericLoadHandler(self: *Self, T: type, instruction: u32, comptime sign_extend: bool) void {
+            const bitcnt = @typeInfo(T).int.bits;
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_extended = signExtend(Tword, parsed.imm);
+            const address = self.getRegister(parsed.rs1) +% imm_extended;
+            var bytes_read: [bitcnt/8]u8 = undefined;
+            // TODO: proper errors
+            self.bus.readMemory(address, &bytes_read) catch @panic("Cannot write");
+            const read_memory: T = std.mem.readInt(T, &bytes_read, LittleEndian);
+            const result: Tword = if (sign_extend) signExtend(Tword, read_memory) else @intCast(read_memory);
+            self.setRegister(parsed.rd, result);
         }
 
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(Tword) {
-            return .{
-                .allocator = allocator,
-                .registers = std.mem.zeroes([32]Tword),
-                .pc = memory_start,
-                .bus = try Bus(Tword).init(allocator, memory_start, memory_length),
-                .test_result = null,
-                .writer = writer,
+        fn handleLb(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u8, instruction, true);
+        }
+
+        fn handleLh(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u16, instruction, true);
+        }
+
+        fn handleLw(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u32, instruction, true);
+        }
+
+        fn handleLbu(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u8, instruction, false);
+        }
+
+        fn handleLhu(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u16, instruction, false);
+        }
+
+        fn genericStoreHandler(self: *Self, T: type, instruction: u32) void {
+            const bitcnt = @typeInfo(T).int.bits;
+            const parsed: STypeInstruction = @bitCast(instruction);
+            const imm_extended = signExtend(Tword, parsed.getImm());
+            const address = self.getRegister(parsed.rs1) +% imm_extended;
+            var to_write: [@typeInfo(Tword).int.bits/8]u8 = undefined;
+            std.mem.writeInt(Tword, &to_write, self.getRegister(parsed.rs2), LittleEndian);
+            // TODO: proper errors
+            self.bus.writeMemory(address, to_write[0..(bitcnt/8)]) catch @panic("Cannot write");
+        }
+
+        fn handleSb(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u8, instruction);
+        }
+
+        fn handleSh(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u16, instruction);
+        }
+
+        fn handleSw(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u32, instruction);
+        }
+
+        fn handleBeq(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) == self.getRegister(parsed.rs2)) {
+                self.pc +%= imm;
+            } else {
+                self.pc += 4;
+            }
+        }
+
+        fn handleBne(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) != self.getRegister(parsed.rs2)) {
+                self.pc +%= imm;
+            } else {
+                self.pc += 4;
+            }
+        }
+
+        fn handleBlt(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            if (reg1 < reg2) {
+                self.pc +%= imm;
+            } else {
+                self.pc +%= 4;
+            }
+        }
+
+        fn handleBge(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const reg2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            if (reg1 >= reg2) {
+                self.pc +%= imm;
+            } else {
+                self.pc +%= 4;
+            }
+        }
+
+        fn handleBltu(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) < self.getRegister(parsed.rs2)) {
+                self.pc +%= imm;
+            } else {
+                self.pc +%= 4;
+            }
+        }
+
+        fn handleBgeu(self: *Self, instruction: u32) void {
+            const parsed: BTypeInstruction = @bitCast(instruction);
+            const imm = parsed.getImm(Tword);
+            if (self.getRegister(parsed.rs1) >= self.getRegister(parsed.rs2)) {
+                self.pc +%= imm;
+            } else {
+                self.pc +%= 4;
+            }
+        }
+
+        fn handleJal(self: *Self, instruction: u32) void {
+            const parsed: JTypeInstruction = @bitCast(instruction);
+            self.setRegister(parsed.rd, self.pc + 4);
+            const imm = parsed.getImm(Tword);
+            self.pc +%= imm;
+        }
+
+        fn handleJalr(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const new_pc = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
+            self.setRegister(parsed.rd, self.pc + 4);
+            self.pc = new_pc;
+        }
+
+        fn handleLui(self: *Self, instruction: u32) void {
+            const parsed: UTypeInstruction = @bitCast(instruction);
+            const imm: Tword = @intCast(parsed.imm);
+            self.setRegister(
+                parsed.rd,
+                imm << 12
+            );
+        }
+
+        fn handleAuipc(self: *Self, instruction: u32) void {
+            const parsed: UTypeInstruction = @bitCast(instruction);
+            const imm_word: Tword = @intCast(parsed.imm);
+            self.setRegister(
+                parsed.rd,
+                self.pc +% (imm_word << 12)
+            );
+        }
+
+        fn handleEcall(self: *Self, instruction: u32) void {
+            _ = instruction;
+            std.debug.assert(!self.isHalted());
+            const memory_start = self.getRegister(11);
+            const memory_end = self.getRegister(12);
+            self.test_result = TestResult(Tword) {
+                .a0 = self.getRegister(10),
+                .signature_address = if (memory_start == memory_end) null else .{
+                    .start = memory_start,
+                    .length = memory_end - memory_start,
+                },
             };
         }
 
-        pub fn deinit(self: *Self) void {
-            self.bus.deinit(self.allocator);
-        }
-
-        pub fn isHalted(self: *Self) bool {
-            return self.test_result != null;
-        }
-
-        pub fn getSignature(self: *Self, allocator: Allocator) ![]u8 {
-            std.debug.assert(self.isHalted());
-            const signature = self.test_result.?.signature_address.?;
-            const buffer: []u8 = try allocator.alloc(u8, @intCast(signature.length));
-            try self.bus.readMemory(signature.start, buffer);
-            return buffer;
-        }
+        fn handleNop(_: *Self, _: u32) void { }
     };
 }
 
