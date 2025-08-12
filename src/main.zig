@@ -15,7 +15,7 @@ const null_writer = std.io.AnyWriter {
 };
 
 pub fn runSingle(allocator: std.mem.Allocator, image: []const u8, working_directory: std.fs.Dir, writer: std.io.AnyWriter) !void {
-    const entrypoint: Tword = 0x0800_0000;
+    const entrypoint: Tword = 0x8000_0000;
     const memory_size: Tword = 1024*1024;
     var rvcpu = try cpu.RVCPU(Tword).init(allocator, entrypoint, memory_size, writer);
     defer rvcpu.deinit();
