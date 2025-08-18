@@ -9,11 +9,25 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
+      tests = import ./tests { inherit pkgs; };
     in {
+      packages.${system} = with tests; {
+        inherit riscv-tests
+                riscv-tests-orig;
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
           zig
         ];
+      };
+
+      apps.${system}.tests = {
+        type = "app";
+        program = pkgs.writeScript "" ''
+          zig build
+          ./zig-out/bin/bemu multi rv32ui-p ${tests.riscv-tests}/share/riscv-tests/
+        '';
       };
     };
 }
