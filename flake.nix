@@ -24,10 +24,10 @@
 
       apps.${system}.tests = {
         type = "app";
-        program = pkgs.writeScript "" ''
+        program = "${pkgs.writeShellScript "run_riscv_tests" ''
           zig build
           ./zig-out/bin/bemu multi rv32ui-p ${tests.riscv-tests}/share/riscv-tests/
-        '';
+        ''}";
       };
     };
 }
