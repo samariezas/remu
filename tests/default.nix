@@ -32,7 +32,9 @@ in rec {
       autoconf
     ];
 
-    patchPhase = ''
+    preConfigurePhases = [ "postPatchPhase" ];
+
+    postPatchPhase = ''
       for f in isa mt benchmarks
       do
           sed -i 's/-unknown-elf-/-none-elf-/' $f/Makefile
@@ -48,7 +50,9 @@ in rec {
   riscv-tests-elf = riscv-tests-orig.overrideAttrs (old: {
     name = "riscv-tests-elf";
 
-    patchPhase = old.patchPhase + ''
+    patches = [ ./riscv_failing_test.patch ];
+
+    postPatchPhase = old.postPatchPhase + ''
       rm ./env/p/riscv_test.h
       cp ${./riscv_test.h} ./env/p/riscv_test.h
     '';
