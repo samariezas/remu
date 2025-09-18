@@ -35,6 +35,11 @@ pub fn runSingle(allocator: std.mem.Allocator, image: []const u8, working_direct
         try rvcpu.tick();
     }
 
+    if (rvcpu.getTestFailureCode()) |code| {
+        std.debug.print("Failed test with code {}\n", .{code});
+        return error.TestFailed;
+    }
+
     if (try tests.loadSignature(allocator, image, working_directory)) |signature| {
         defer allocator.free(signature);
         const our_signature = try rvcpu.getSignature(allocator);

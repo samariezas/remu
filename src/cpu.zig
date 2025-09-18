@@ -434,6 +434,15 @@ pub fn RVCPU(comptime Tword: type) type {
             return self.test_result != null;
         }
 
+        pub fn getTestFailureCode(self: *Self) ?Tword {
+            std.debug.assert(self.test_result != null);
+            if (self.test_result.?.is_success()) {
+                return null;
+            } else {
+                return self.test_result.?.a0;
+            }
+        }
+
         pub fn getSignature(self: *Self, allocator: Allocator) ![]u8 {
             std.debug.assert(self.isHalted());
             const signature = self.test_result.?.signature_address.?;
@@ -772,11 +781,14 @@ pub fn RVCPU(comptime Tword: type) type {
             const memory_end = self.getRegister(12);
             self.test_result = TestResult(Tword) {
                 .a0 = self.getRegister(10),
-                .signature_address = if (memory_start == memory_end) null else .{
+                .signature_address = null,
+            };
+            if (self.test_result.?.is_success()) {
+                self.test_result.?.signature_address = if (memory_start == memory_end) null else .{
                     .start = memory_start,
                     .length = memory_end - memory_start,
-                },
-            };
+                };
+            }
         }
 
         fn handleNop(_: *Self, _: u32) void { }
