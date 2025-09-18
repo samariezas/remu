@@ -2,11 +2,13 @@ diff --git a/isa/rv64ui/ld_st.S b/isa/rv64ui/ld_st.S
 index d03e132..28e4a47 100644
 --- a/isa/rv64ui/ld_st.S
 +++ b/isa/rv64ui/ld_st.S
-@@ -118,6 +118,7 @@ RVTEST_CODE_END
+@@ -117,6 +117,9 @@ RVTEST_CODE_BEGIN
+ RVTEST_CODE_END
  
    .data
++#if __riscv_xlen == 32
 +  .org 0x1000
++#endif
  RVTEST_DATA_BEGIN
  
    TEST_DATA
- 
