@@ -402,6 +402,12 @@ pub fn RVCPU(comptime Tword: type) type {
                 Instr.makeF37("SLLIW", 0b0011011, 1, 0,    handleSlliw, null),
                 Instr.makeF37("SRLIW", 0b0011011, 5, 0,    handleSrliw, null),
                 Instr.makeF37("SRAIW", 0b0011011, 5, 0x20, handleSraiw, null),
+
+                Instr.makeF37("ADDW",  0b0111011, 0, 0,    handleAddw, null),
+                Instr.makeF37("SUBW",  0b0111011, 0, 0x20, handleSubw, null),
+                Instr.makeF37("SLLW",  0b0111011, 1, 0,    handleSllw, null),
+                Instr.makeF37("SRLW",  0b0111011, 5, 0,    handleSrlw, null),
+                Instr.makeF37("SRAW",  0b0111011, 5, 0x20, handleSraw, null),
             } else [_]Instr {}) ++
             (if (Tword == u32) [_]Instr {
                 Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
@@ -724,6 +730,58 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 signExtend(Tword, result)
+            );
+        }
+
+        fn handleAddw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b: u32 = @truncate(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, a +% b)
+            );
+        }
+
+        fn handleSubw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b: u32 = @truncate(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, a -% b)
+            );
+        }
+
+        fn handleSllw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, truncated << shift_len)
+            );
+        }
+
+        fn handleSrlw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, truncated >> shift_len)
+            );
+        }
+
+        fn handleSraw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            const truncated_signed: i32 = @bitCast(truncated);
+            const result_signed = truncated_signed >> shift_len;
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, result_signed)
             );
         }
 
