@@ -758,19 +758,19 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleLui(self: *Self, instruction: u32) void {
             const parsed: UTypeInstruction = @bitCast(instruction);
-            const imm: Tword = @intCast(parsed.imm);
+            const imm: u32 = @intCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
-                imm << 12
+                signExtend(Tword, imm << 12),
             );
         }
 
         fn handleAuipc(self: *Self, instruction: u32) void {
             const parsed: UTypeInstruction = @bitCast(instruction);
-            const imm_word: Tword = @intCast(parsed.imm);
+            const imm = @as(u32, parsed.imm) << 12;
             self.setRegister(
                 parsed.rd,
-                self.pc +% (imm_word << 12)
+                self.pc +% signExtend(Tword, imm),
             );
         }
 
