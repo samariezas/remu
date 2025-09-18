@@ -166,6 +166,8 @@ pub fn runMultipleSuites(
     const results = [_]TestSuiteResult {
         try runMulti(base32, allocator, result_allocator, "rv32ui-p", path, writer),
         try runMulti(base64, allocator, result_allocator, "rv64ui-p", path, writer),
+        try runMulti(base32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
+        try runMulti(base64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
     };
     try printResults(&results, writer);
 }
@@ -190,7 +192,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        try runSingle(base64, allocator, image, std.fs.cwd(), stdout_writer);
+        try runSingle(base32.withM(), allocator, image, std.fs.cwd(), stdout_writer);
     } else if (std.mem.eql(u8, run_type, "multi")) {
         const start = args.next() orelse @panic("Missing start of name argument");
         const path = args.next() orelse @panic("Missing path argument");

@@ -6,6 +6,10 @@ fn toSigned(comptime T: type) type {
     return std.meta.Int(.signed, @typeInfo(T).int.bits);
 }
 
+fn toUnsigned(comptime T: type) type {
+    return std.meta.Int(.unsigned, @typeInfo(T).int.bits);
+}
+
 fn signExtend(comptime T: type, val: anytype) T {
     // TODO: assertions about types
     const SignedOriginalType = toSigned(@TypeOf(val)); //i12
@@ -300,6 +304,8 @@ pub const WordSize = enum {
 };
 
 pub const CpuOptions = struct {
+    const Self = @This();
+
     word_size: WordSize,
     m_extension: bool,
 
@@ -308,6 +314,12 @@ pub const CpuOptions = struct {
             .word_size = word_size,
             .m_extension = false,
         };
+    }
+
+    pub fn withM(self: Self) Self {
+        var new = self;
+        new.m_extension = true;
+        return new;
     }
 };
 
@@ -404,7 +416,7 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
             Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
             Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
         } ++ 
-            (if (Tword == u64) [_]Instr {
+            (if (opt.word_size == .w64) [_]Instr {
                 Instr.makeF3("LWU",  0b0000011, 6,    handleLwu,  null),
                 Instr.makeF3("LD",   0b0000011, 3,    handleLd,  null),
                 Instr.makeF3("SD",   0b0100011, 3,    handleSd,  null),
@@ -424,10 +436,23 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
                 Instr.makeF37("SRLW",  0b0111011, 5, 0,    handleSrlw, null),
                 Instr.makeF37("SRAW",  0b0111011, 5, 0x20, handleSraw, null),
             } else [_]Instr {}) ++
-            (if (Tword == u32) [_]Instr {
+            (if (opt.word_size == .w32) [_]Instr {
                 Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
                 Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
                 Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+            } else [_]Instr {}) ++
+            (if (opt.m_extension) [_]Instr {
+                Instr.makeF37("MUL",   0b0110011, 0, 1,    handleMul,   RTypeInstruction.write),
+                Instr.makeF37("MULH",  0b0110011, 1, 1,    handleMulh,  RTypeInstruction.write),
+                Instr.makeF37("MULHSU",0b0110011, 2, 1,    handleMulhsu,RTypeInstruction.write),
+                Instr.makeF37("MULHU", 0b0110011, 3, 1,    handleMulhu, RTypeInstruction.write),
+                Instr.makeF37("DIV",   0b0110011, 4, 1,    handleDiv,   RTypeInstruction.write),
+                Instr.makeF37("DIVU",  0b0110011, 5, 1,    handleDivu,  RTypeInstruction.write),
+                Instr.makeF37("REM",   0b0110011, 6, 1,    handleRem,   RTypeInstruction.write),
+                Instr.makeF37("REMU",  0b0110011, 7, 1,    handleRemu,  RTypeInstruction.write),
+            } else [_]Instr {}) ++
+            (if (opt.word_size == .w64 and opt.m_extension) [_]Instr {
+
             } else [_]Instr {});
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -978,6 +1003,108 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
                     .length = memory_end - memory_start,
                 };
             }
+        }
+
+        fn handleMul(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            self.setRegister(
+                parsed.rd,
+                self.getRegister(parsed.rs1) *% self.getRegister(parsed.rs2)
+            );
+        }
+
+        fn handleMulh(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const bit_count = @typeInfo(Tword).int.bits;
+            const Tdoubleword = std.meta.Int(.signed, bit_count*2);
+            const a = signExtend(Tdoubleword, self.getRegister(parsed.rs1));
+            const b = signExtend(Tdoubleword, self.getRegister(parsed.rs2));
+            const result_unsigned: toUnsigned(Tdoubleword) = @bitCast(a *% b);
+            self.setRegister(
+                parsed.rd,
+                @truncate(result_unsigned >> bit_count)
+            );
+        }
+
+        fn handleMulhsu(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const bit_count = @typeInfo(Tword).int.bits;
+            const Tdoubleword = std.meta.Int(.unsigned, bit_count*2);
+            const sign_bit = (self.getRegister(parsed.rs1) >> (bit_count - 1)) != 0;
+            const a_word: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const a: Tdoubleword = @intCast(@abs(a_word));
+            const b: Tdoubleword = @intCast(self.getRegister(parsed.rs2));
+            var result: toSigned(Tdoubleword) = @bitCast(a *% b);
+            if (sign_bit) result = -result;
+            result = result >> bit_count;
+            const result_unsigned: toUnsigned(Tdoubleword) = @bitCast(result);
+            self.setRegister(
+                parsed.rd,
+                @truncate(result_unsigned)
+            );
+        }
+
+        fn handleMulhu(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const bit_count = @typeInfo(Tword).int.bits;
+            const Tdoubleword = std.meta.Int(.unsigned, bit_count*2);
+            const a = @as(Tdoubleword, self.getRegister(parsed.rs1));
+            const b = @as(Tdoubleword, self.getRegister(parsed.rs2));
+            const result: Tword = @truncate((a *% b) >> bit_count);
+            self.setRegister(
+                parsed.rd,
+                result
+            );
+        }
+
+        fn handleDiv(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const b: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            const result = div: {
+                if (b == 0) { break :div -1; }
+                else if (a == std.math.minInt(toSigned(Tword)) and b == -1) { break :div a; }
+                else { break :div @divTrunc(a, b); }
+            };
+            self.setRegister(
+                parsed.rd,
+                @bitCast(result)
+            );
+        }
+        
+        fn handleDivu(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a = self.getRegister(parsed.rs1);
+            const b = self.getRegister(parsed.rs2);
+            self.setRegister(
+                parsed.rd,
+                if (b == 0) std.math.maxInt(Tword) else a / b
+            );
+        }
+
+        fn handleRem(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const b: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
+            const result = div: {
+                if (b == 0) { break :div a; }
+                else if (a == std.math.minInt(toSigned(Tword)) and b == -1) { break :div 0; }
+                else { break :div @rem(a, b); }
+            };
+            self.setRegister(
+                parsed.rd,
+                @bitCast(result)
+            );
+        }
+
+        fn handleRemu(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a = self.getRegister(parsed.rs1);
+            const b = self.getRegister(parsed.rs2);
+            self.setRegister(
+                parsed.rd,
+                if (b == 0) a else a % b
+            );
         }
 
         fn handleNop(_: *Self, _: u32) void { }
