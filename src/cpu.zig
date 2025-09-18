@@ -452,7 +452,11 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
                 Instr.makeF37("REMU",  0b0110011, 7, 1,    handleRemu,  RTypeInstruction.write),
             } else [_]Instr {}) ++
             (if (opt.word_size == .w64 and opt.m_extension) [_]Instr {
-
+                Instr.makeF37("MULW",  0b0111011, 0, 1,    handleMulw,  RTypeInstruction.write),
+                Instr.makeF37("DIVW",  0b0111011, 4, 1,    handleDivw,  RTypeInstruction.write),
+                Instr.makeF37("DIVUW", 0b0111011, 5, 1,    handleDivuw, RTypeInstruction.write),
+                Instr.makeF37("REMW",  0b0111011, 6, 1,    handleRemw,  RTypeInstruction.write),
+                Instr.makeF37("REMUW", 0b0111011, 7, 1,    handleRemuw, RTypeInstruction.write),
             } else [_]Instr {});
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -1104,6 +1108,71 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
             self.setRegister(
                 parsed.rd,
                 if (b == 0) a else a % b
+            );
+        }
+
+        fn handleMulw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b: u32 = @truncate(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, a *% b)
+            );
+        }
+        
+        fn handleDivw(self: *Self, instruction: u32) void {
+            // TODO: refactor DIV and DIVW into one function, same for REM
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a_unsigned: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b_unsigned: u32 = @truncate(self.getRegister(parsed.rs2));
+            const a: i32 = @bitCast(a_unsigned);
+            const b: i32 = @bitCast(b_unsigned);
+            const result = div: {
+                if (b == 0) { break :div -1; }
+                else if (a == std.math.minInt(i32) and b == -1) { break :div a; }
+                else { break :div @divTrunc(a, b); }
+            };
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, result)
+            );
+        }
+
+        fn handleDivuw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b: u32 = @truncate(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                if (b == 0) std.math.maxInt(Tword) else signExtend(Tword, a / b)
+            );
+        }
+
+        fn handleRemw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a_unsigned: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b_unsigned: u32 = @truncate(self.getRegister(parsed.rs2));
+            const a: i32 = @bitCast(a_unsigned);
+            const b: i32 = @bitCast(b_unsigned);
+            const result = div: {
+                if (b == 0) { break :div a; }
+                else if (a == std.math.minInt(i32) and b == -1) { break :div 0; }
+                else { break :div @rem(a, b); }
+            };
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, result)
+            );
+        }
+
+        fn handleRemuw(self: *Self, instruction: u32) void {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const a: u32 = @truncate(self.getRegister(parsed.rs1));
+            const b: u32 = @truncate(self.getRegister(parsed.rs2));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, if (b == 0) a else a % b)
             );
         }
 
