@@ -305,6 +305,14 @@ pub fn RVCPU(comptime Tword: type) type {
 
         const Instr = InstructionDescriptor(Tword);
 
+        fn shiftLen() type {
+            switch (Tword) {
+                u32 => return u5,
+                u64 => return u6,
+                else => @compileError("Unsupported word type"),
+            }
+        }
+
         const Tshamt32 = packed struct {
             shift_len: u5,
             id: u7,
@@ -382,9 +390,13 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
         } ++ 
             (if (Tword == u64) [_]Instr {
+                Instr.makeF3("LWU",  0b0000011, 6,    handleLwu,  null),
+                Instr.makeF3("LD",   0b0000011, 3,    handleLd,  null),
+                Instr.makeF3("SD",   0b0100011, 3,    handleSd,  null),
+
                 Instr.makeF36("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
                 Instr.makeF36("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
-                Instr.makeF36("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+                Instr.makeF36("SRAI",  0b0010011, 5, 0x10, handleSrai,  ITypeInstruction.write),
 
                 Instr.makeF3("ADDIW",  0b0011011, 0,       handleAddiw, null),
                 Instr.makeF37("SLLIW", 0b0011011, 1, 0,    handleSlliw, null),
@@ -545,7 +557,7 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleSll(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
-            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) << shift_len
@@ -554,7 +566,7 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleSrl(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
-            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) >> shift_len
@@ -563,7 +575,7 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleSra(self: *Self, instruction: u32) void {
             const parsed: RTypeInstruction = @bitCast(instruction);
-            const shift_len: u5 = @intCast(self.getRegister(parsed.rs2) & 0x1f);
+            const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             const src_signed: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const result_signed = src_signed >> shift_len;
             self.setRegister(
@@ -740,12 +752,20 @@ pub fn RVCPU(comptime Tword: type) type {
             self.genericLoadHandler(u32, instruction, true);
         }
 
+        fn handleLd(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u64, instruction, true);
+        }
+
         fn handleLbu(self: *Self, instruction: u32) void {
             self.genericLoadHandler(u8, instruction, false);
         }
 
         fn handleLhu(self: *Self, instruction: u32) void {
             self.genericLoadHandler(u16, instruction, false);
+        }
+
+        fn handleLwu(self: *Self, instruction: u32) void {
+            self.genericLoadHandler(u32, instruction, false);
         }
 
         fn genericStoreHandler(self: *Self, T: type, instruction: u32) void {
@@ -769,6 +789,10 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleSw(self: *Self, instruction: u32) void {
             self.genericStoreHandler(u32, instruction);
+        }
+
+        fn handleSd(self: *Self, instruction: u32) void {
+            self.genericStoreHandler(u64, instruction);
         }
 
         fn handleBeq(self: *Self, instruction: u32) void {
