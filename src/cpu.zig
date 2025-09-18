@@ -73,6 +73,7 @@ const InstructionID = union(enum) {
     none,
     funct_3: struct { funct3: u3 },
     funct_3_7: struct { funct3: u3, funct7: u7 },
+    funct_3_6: struct { funct3: u3, funct6: u6 },
 };
 
 fn InstructionDescriptor(comptime Tword: type) type {
@@ -126,6 +127,17 @@ fn InstructionDescriptor(comptime Tword: type) type {
             return .{
                 .opcode = opcode,
                 .id = InstructionID { .funct_3_7 = .{ .funct3 = funct3, .funct7 = funct7 } },
+                .handler = handler,
+                .name = name,
+                .advance_pc = true,
+                .writer_fn = writer_fn,
+            };
+        }
+
+        fn makeF36(name: []const u8, opcode: u7, funct3: u3, funct6: u6, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID { .funct_3_6 = .{ .funct3 = funct3, .funct6 = funct6 } },
                 .handler = handler,
                 .name = name,
                 .advance_pc = true,
@@ -293,6 +305,28 @@ pub fn RVCPU(comptime Tword: type) type {
 
         const Instr = InstructionDescriptor(Tword);
 
+        const Tshamt32 = packed struct {
+            shift_len: u5,
+            id: u7,
+        };
+
+        const Tshamt64 = packed struct {
+            shift_len: u6,
+            id: u6,
+        };
+
+        const Tshamt = shamt: {
+            switch (Tword) {
+                u32 => {
+                    break :shamt Tshamt32;
+                },
+                u64 => {
+                    break :shamt Tshamt64;
+                },
+                else => @compileError("Unsupported word type"),
+            }
+        };
+
         const instructions = [_]Instr {
             // R-type arithmetic/logic
             Instr.makeF37("ADD",  0b0110011, 0,    0, handleAdd,  RTypeInstruction.write),
@@ -311,9 +345,6 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("XORI",   0b0010011, 4,       handleXori,  ITypeInstruction.write),
             Instr.makeF3("ORI",    0b0010011, 6,       handleOri,   ITypeInstruction.write),
             Instr.makeF3("ANDI",   0b0010011, 7,       handleAndi,  ITypeInstruction.write),
-            Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
-            Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
-            Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
             Instr.makeF3("SLTI",   0b0010011, 2,       handleSlti,  ITypeInstruction.write),
             Instr.makeF3("SLTIU",  0b0010011, 3,       handleSltiu, ITypeInstruction.write),
 
@@ -349,7 +380,22 @@ pub fn RVCPU(comptime Tword: type) type {
             Instr.makeF3("ECALL",   0b1110011, 0, handleEcall, null).noJump(),
             Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
             Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
-        };
+        } ++ 
+            (if (Tword == u64) [_]Instr {
+                Instr.makeF36("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
+                Instr.makeF36("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
+                Instr.makeF36("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+
+                Instr.makeF3("ADDIW",  0b0011011, 0,       handleAddiw, null),
+                Instr.makeF37("SLLIW", 0b0011011, 1, 0,    handleSlliw, null),
+                Instr.makeF37("SRLIW", 0b0011011, 5, 0,    handleSrliw, null),
+                Instr.makeF37("SRAIW", 0b0011011, 5, 0x20, handleSraiw, null),
+            } else [_]Instr {}) ++
+            (if (Tword == u32) [_]Instr {
+                Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
+                Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
+                Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+            } else [_]Instr {});
 
         fn getRegister(self: *Self, id: usize) Tword {
             return self.registers[id];
@@ -369,6 +415,7 @@ pub fn RVCPU(comptime Tword: type) type {
                 .none => return true,
                 .funct_3 => |*v| return v.funct3 == id.funct3,
                 .funct_3_7 => |*v| return v.funct3 == id.funct3 and v.funct7 == id.funct7,
+                .funct_3_6 => |*v| return v.funct3 == id.funct3 and v.funct6 == (id.funct7 >> 1),
             }
             return false;
         }
@@ -378,7 +425,12 @@ pub fn RVCPU(comptime Tword: type) type {
                 var buffer: [16]u8 = undefined;
                 const sep = if ((i + 1) % width == 0) "\n" else " ";
                 const register_name = try std.fmt.bufPrint(&buffer, "x{}", .{i});
-                try writer.print("{s: >3}={x:0>8}{s}", .{register_name, self.registers[i], sep});
+                const fmt_string = switch (Tword) {
+                    u32 => "{s: >3}={x:0>8}{s}",
+                    u64 => "{s: >3}={x:0>16}{s}",
+                    else => @compileError("Unsupported word size"),
+                };
+                try writer.print(fmt_string, .{register_name, self.registers[i], sep});
             }
         }
 
@@ -575,11 +627,7 @@ pub fn RVCPU(comptime Tword: type) type {
 
         fn handleSlli(self: *Self, instruction: u32) void {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const imm_split: packed struct {
-                shift_len: u5,
-                id: u7,
-            } = @bitCast(parsed.imm);
-            std.debug.assert(imm_split.id == 0);
+            const imm_split: Tshamt = @bitCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
                 (self.getRegister(parsed.rs1) << imm_split.shift_len)
@@ -587,17 +635,19 @@ pub fn RVCPU(comptime Tword: type) type {
         }
 
         fn handleSrli(self: *Self, instruction: u32) void {
-            const parsed: RTypeInstruction = @bitCast(instruction);
-            const src = self.getRegister(parsed.rs1);
-            const result = src >> parsed.rs2;
-            self.setRegister(parsed.rd, result);
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: Tshamt = @bitCast(parsed.imm);
+            self.setRegister(
+                parsed.rd,
+                (self.getRegister(parsed.rs1) >> imm_split.shift_len)
+            );
         }
 
         fn handleSrai(self: *Self, instruction: u32) void {
-            const parsed: RTypeInstruction = @bitCast(instruction);
-            const src = self.getRegister(parsed.rs1);
-            const signed: toSigned(Tword) = @bitCast(src);
-            const shifted = signed >> parsed.rs2;
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: Tshamt = @bitCast(parsed.imm);
+            const signed_src: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
+            const shifted = signed_src >> imm_split.shift_len;
             const result: Tword = @bitCast(shifted);
             self.setRegister(parsed.rd, result);
         }
@@ -619,6 +669,49 @@ pub fn RVCPU(comptime Tword: type) type {
             self.setRegister(
                 parsed.rd,
                 if (rs1 < imm) 1 else 0
+            );
+        }
+
+        fn handleAddiw(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const added: Tword = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
+            const truncated: u32 = @truncate(added);
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, truncated)
+            );
+        }
+
+        fn handleSlliw(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: Tshamt32 = @bitCast(parsed.imm);
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, truncated << imm_split.shift_len)
+            );
+        }
+
+        fn handleSrliw(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: Tshamt32 = @bitCast(parsed.imm);
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, truncated >> imm_split.shift_len)
+            );
+        }
+
+        fn handleSraiw(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            const imm_split: Tshamt32 = @bitCast(parsed.imm);
+            const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
+            const signed_src: i32 = @bitCast(truncated);
+            const shifted = signed_src >> imm_split.shift_len;
+            const result: u32 = @bitCast(shifted);
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, result)
             );
         }
 
