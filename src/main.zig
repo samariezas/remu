@@ -1,7 +1,12 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
 const tests = @import("tests.zig");
+const CpuOptions = cpu.CpuOptions;
+const WordSize = cpu.WordSize;
 const linux = std.os.linux;
+
+const base32 = CpuOptions.makeBase(WordSize.w32);
+const base64 = CpuOptions.makeBase(WordSize.w64);
 
 fn writeNull(_: *const anyopaque, bytes: []const u8) anyerror!usize {
     return bytes.len;
@@ -13,15 +18,16 @@ const null_writer = std.io.AnyWriter {
 };
 
 pub fn runSingle(
-    Tword: type,
+    comptime opt: CpuOptions,
     allocator: std.mem.Allocator,
     image: []const u8,
     working_directory: std.fs.Dir,
     writer: std.io.AnyWriter
 ) !void {
-    const entrypoint: Tword = 0x8000_0000;
-    const memory_size: Tword = 1024*1024;
-    var rvcpu = try cpu.RVCPU(Tword).init(allocator, entrypoint, memory_size, writer);
+    const cpu_type = cpu.RVCPU(opt);
+    const entrypoint: cpu_type.Tword = 0x8000_0000;
+    const memory_size: cpu_type.Tword = 1024*1024;
+    var rvcpu = try cpu_type.init(allocator, entrypoint, memory_size, writer);
     defer rvcpu.deinit();
 
     const buffer = try allocator.alloc(u8, @intCast(memory_size));
@@ -97,7 +103,7 @@ fn printResults(
 }
 
 fn runMulti(
-    Tword: type,
+    comptime opt: CpuOptions,
     allocator: std.mem.Allocator,
     result_allocator: std.mem.Allocator,
     start: []const u8,
@@ -126,7 +132,7 @@ fn runMulti(
             };
             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
 
-            try runSingle(Tword, allocator, i, dest_dir, null_writer);
+            try runSingle(opt, allocator, i, dest_dir, null_writer);
             std.process.exit(0);
         } else {
             var status: u32 = 0;
@@ -158,8 +164,8 @@ pub fn runMultipleSuites(
     writer: std.io.AnyWriter
 ) !void {
     const results = [_]TestSuiteResult {
-        try runMulti(u32, allocator, result_allocator, "rv32ui-p", path, writer),
-        try runMulti(u64, allocator, result_allocator, "rv64ui-p", path, writer),
+        try runMulti(base32, allocator, result_allocator, "rv32ui-p", path, writer),
+        try runMulti(base64, allocator, result_allocator, "rv64ui-p", path, writer),
     };
     try printResults(&results, writer);
 }
@@ -184,13 +190,13 @@ pub fn main() !void {
     if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        try runSingle(u64, allocator, image, std.fs.cwd(), stdout_writer);
+        try runSingle(base64, allocator, image, std.fs.cwd(), stdout_writer);
     } else if (std.mem.eql(u8, run_type, "multi")) {
         const start = args.next() orelse @panic("Missing start of name argument");
         const path = args.next() orelse @panic("Missing path argument");
         std.debug.assert(!args.skip());
         const results = [_]TestSuiteResult {
-            try runMulti(u64, allocator, arena_allocator, start, path, stdout_writer),
+            try runMulti(base64, allocator, arena_allocator, start, path, stdout_writer),
         };
         try printResults(&results, stdout_writer);
     } else if (std.mem.eql(u8, run_type, "full")) {

@@ -76,9 +76,11 @@ const InstructionID = union(enum) {
     funct_3_6: struct { funct3: u3, funct6: u6 },
 };
 
-fn InstructionDescriptor(comptime Tword: type) type {
+fn InstructionDescriptor(comptime opt: CpuOptions) type {
     return struct {
-        const InstructionHandler = *const fn (*RVCPU(Tword), u32) void;
+        const Tcpu = RVCPU(opt);
+        const Tword = Tcpu.Tword;
+        const InstructionHandler = *const fn (*Tcpu, u32) void;
         const WriterHandler = *const fn (std.io.AnyWriter, u32) anyerror!void;
 
         opcode: u7,
@@ -292,8 +294,31 @@ pub fn TestResult(comptime Tword: type) type {
     };
 }
 
-pub fn RVCPU(comptime Tword: type) type {
+pub const WordSize = enum {
+    w32,
+    w64,
+};
+
+pub const CpuOptions = struct {
+    word_size: WordSize,
+    m_extension: bool,
+
+    pub fn makeBase(word_size: WordSize) CpuOptions {
+        return .{
+            .word_size = word_size,
+            .m_extension = false,
+        };
+    }
+};
+
+pub fn RVCPU(comptime opt: CpuOptions) type {
     return struct {
+        const Self = @This();
+        pub const Tword = switch (opt.word_size) {
+            .w32 => u32,
+            .w64 => u64,
+        };
+
         allocator: Allocator,
         registers: [32]Tword,
         pc: Tword,
@@ -301,15 +326,12 @@ pub fn RVCPU(comptime Tword: type) type {
         test_result: ?TestResult(Tword),
         writer: std.io.AnyWriter,
 
-        const Self = @This();
-
-        const Instr = InstructionDescriptor(Tword);
+        const Instr = InstructionDescriptor(opt);
 
         fn shiftLen() type {
-            switch (Tword) {
-                u32 => return u5,
-                u64 => return u6,
-                else => @compileError("Unsupported word type"),
+            switch (opt.word_size) {
+                .w32 => return u5,
+                .w64 => return u6,
             }
         }
 
@@ -323,16 +345,9 @@ pub fn RVCPU(comptime Tword: type) type {
             id: u6,
         };
 
-        const Tshamt = shamt: {
-            switch (Tword) {
-                u32 => {
-                    break :shamt Tshamt32;
-                },
-                u64 => {
-                    break :shamt Tshamt64;
-                },
-                else => @compileError("Unsupported word type"),
-            }
+        const Tshamt = switch (opt.word_size) {
+            .w32 => Tshamt32,
+            .w64 => Tshamt64,
         };
 
         const instructions = [_]Instr {
@@ -443,10 +458,9 @@ pub fn RVCPU(comptime Tword: type) type {
                 var buffer: [16]u8 = undefined;
                 const sep = if ((i + 1) % width == 0) "\n" else " ";
                 const register_name = try std.fmt.bufPrint(&buffer, "x{}", .{i});
-                const fmt_string = switch (Tword) {
-                    u32 => "{s: >3}={x:0>8}{s}",
-                    u64 => "{s: >3}={x:0>16}{s}",
-                    else => @compileError("Unsupported word size"),
+                const fmt_string = switch (opt.word_size) {
+                    .w32 => "{s: >3}={x:0>8}{s}",
+                    .w64 => "{s: >3}={x:0>16}{s}",
                 };
                 try writer.print(fmt_string, .{register_name, self.registers[i], sep});
             }
@@ -485,7 +499,7 @@ pub fn RVCPU(comptime Tword: type) type {
             try self.bus.writeMemory(entrypoint, buffer);
         }
 
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(Tword) {
+        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(opt) {
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
