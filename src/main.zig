@@ -3,8 +3,6 @@ const cpu = @import("cpu.zig");
 const tests = @import("tests.zig");
 const linux = std.os.linux;
 
-const Tword: type = u32;
-
 fn writeNull(_: *const anyopaque, bytes: []const u8) anyerror!usize {
     return bytes.len;
 }
@@ -14,7 +12,13 @@ const null_writer = std.io.AnyWriter {
     .writeFn = writeNull,
 };
 
-pub fn runSingle(allocator: std.mem.Allocator, image: []const u8, working_directory: std.fs.Dir, writer: std.io.AnyWriter) !void {
+pub fn runSingle(
+    Tword: type,
+    allocator: std.mem.Allocator,
+    image: []const u8,
+    working_directory: std.fs.Dir,
+    writer: std.io.AnyWriter
+) !void {
     const entrypoint: Tword = 0x8000_0000;
     const memory_size: Tword = 1024*1024;
     var rvcpu = try cpu.RVCPU(Tword).init(allocator, entrypoint, memory_size, writer);
@@ -60,7 +64,46 @@ fn stringCmp(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
-fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8, writer: std.io.AnyWriter) !void {
+const TestSuiteResult = struct {
+    total_tests: usize,
+    failed_tests: [][]const u8,
+};
+
+fn printResults(
+    results: []const TestSuiteResult,
+    writer: std.io.AnyWriter,
+) !void {
+    var failed_tests: usize = 0;
+    var total_tests: usize = 0;
+    for (results) |r| {
+        total_tests += r.total_tests;
+        failed_tests += r.failed_tests.len;
+    }
+    if (failed_tests != 0) {
+        try writer.print("------------------------------\nFailed tests:\n", .{});
+        for (results) |r| {
+            std.mem.sort([]const u8, r.failed_tests, {}, stringCmp);
+            for (r.failed_tests) |i| {
+                try writer.print("{s}\n", .{i});
+            }
+        }
+        try writer.print("------------------------------\n", .{});
+    }
+    try writer.print("Test summary: {}/{}\n", .{(total_tests - failed_tests), total_tests});
+
+    if (failed_tests != 0) {
+        return error.TestFailed;
+    }
+}
+
+fn runMulti(
+    Tword: type,
+    allocator: std.mem.Allocator,
+    result_allocator: std.mem.Allocator,
+    start: []const u8,
+    path: []const u8,
+    writer: std.io.AnyWriter
+) !TestSuiteResult {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
@@ -83,7 +126,7 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8, w
             };
             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
 
-            try runSingle(allocator, i, dest_dir, null_writer);
+            try runSingle(Tword, allocator, i, dest_dir, null_writer);
             std.process.exit(0);
         } else {
             var status: u32 = 0;
@@ -98,20 +141,27 @@ fn runMulti(allocator: std.mem.Allocator, start: []const u8, path: []const u8, w
         }
         total_tests += 1;
     }
-
-    if (failed_tests.items.len != 0) {
-        try writer.print("------------------------------\nFailed tests:\n", .{});
-        std.mem.sort([]const u8, failed_tests.items, {}, stringCmp);
-        for (failed_tests.items) |i| {
-            try writer.print("{s}\n", .{i});
-        }
-        try writer.print("------------------------------\n", .{});
+    var result = TestSuiteResult {
+        .total_tests = total_tests,
+        .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
+    };
+    for (failed_tests.items, 0..) |t, i| {
+        result.failed_tests[i] = try result_allocator.dupe(u8, t);
     }
-    try writer.print("Test summary: {}/{}\n", .{passed_tests, total_tests});
+    return result;
+}
 
-    if (passed_tests != total_tests) {
-        return error.TestFailed;
-    }
+pub fn runMultipleSuites(
+    allocator: std.mem.Allocator,
+    result_allocator: std.mem.Allocator,
+    path: []const u8,
+    writer: std.io.AnyWriter
+) !void {
+    const results = [_]TestSuiteResult {
+        try runMulti(u32, allocator, result_allocator, "rv32ui-p", path, writer),
+        try runMulti(u64, allocator, result_allocator, "rv64ui-p", path, writer),
+    };
+    try printResults(&results, writer);
 }
 
 pub fn main() !void {
@@ -123,6 +173,9 @@ pub fn main() !void {
             @panic("memory leak detected");
         }
     }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
     var args = std.process.args();
     std.debug.assert(args.skip());
@@ -131,12 +184,19 @@ pub fn main() !void {
     if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        try runSingle(allocator, image, std.fs.cwd(), stdout_writer);
+        try runSingle(u64, allocator, image, std.fs.cwd(), stdout_writer);
     } else if (std.mem.eql(u8, run_type, "multi")) {
         const start = args.next() orelse @panic("Missing start of name argument");
         const path = args.next() orelse @panic("Missing path argument");
         std.debug.assert(!args.skip());
-        try runMulti(allocator, start, path, stdout_writer);
+        const results = [_]TestSuiteResult {
+            try runMulti(u64, allocator, arena_allocator, start, path, stdout_writer),
+        };
+        try printResults(&results, stdout_writer);
+    } else if (std.mem.eql(u8, run_type, "full")) {
+        const path = args.next() orelse @panic("Missing path argument");
+        std.debug.assert(!args.skip());
+        try runMultipleSuites(allocator, arena_allocator, path, stdout_writer);
     } else {
         @panic("Unknown run type");
     }
