@@ -14,8 +14,37 @@ const ElfLibError = error {
     FileImageGetFailed,
 };
 
+pub const LoadableSectionIt = struct {
+    elf_data: [*c]const u8,
+    program_headers: []const c.Elf64_Phdr,
+    current_header_idx: usize,
+
+    fn init(elf_data: [*c]const u8, program_headers: []const c.Elf64_Phdr) LoadableSectionIt {
+        return .{
+            .elf_data = elf_data,
+            .program_headers = program_headers,
+            .current_header_idx = 0,
+        };
+    }
+
+    pub fn next(self: *LoadableSectionIt) ?LoadableSection {
+        while (self.current_header_idx < self.program_headers.len) {
+            const header = self.program_headers[self.current_header_idx];
+            self.current_header_idx += 1;
+            if (header.p_type == c.PT_LOAD) {
+                return .{
+                    .data = self.elf_data[header.p_offset..(header.p_offset+header.p_filesz)],
+                    .start_address = header.p_vaddr,
+                    .padding = header.p_memsz - header.p_filesz,
+                };
+            }
+        }
+        return null;
+    }
+};
+
 pub const LoadableSection = struct {
-    data: []u8,
+    data: []const u8,
     start_address: u64,
     padding: u64,
 };
@@ -52,7 +81,7 @@ pub const Elf = struct {
         }
     }
 
-    pub fn get_program_headers(self: *const Elf) ![]const c.Elf64_Phdr {
+    fn get_program_headers(self: *const Elf) ![]const c.Elf64_Phdr {
         var size: usize = 0;
         if (c.elf_getphdrnum(self.inner, &size) < 0) {
             return ElfLibError.GetProgramHeaderCountFailed;
@@ -65,24 +94,19 @@ pub const Elf = struct {
         }
     }
 
-    pub fn get_loadable_section(self: *const Elf, section: *const c.Elf64_Phdr) !?LoadableSection {
-        if (section.p_type != c.PT_LOAD) return null;
-        std.debug.assert(section.p_memsz >= section.p_filesz);
+    fn get_raw_data(self: *const Elf) ![*c]u8 {
         if (c.elf_rawfile(self.inner, null)) |data| {
-            return .{
-                .data = data[section.p_offset..(section.p_offset+section.p_filesz)],
-                .start_address = section.p_vaddr,
-                .padding = section.p_memsz - section.p_filesz,
-            };
-        } else {
-            return ElfLibError.FileImageGetFailed;
+            return data;
         }
+        return ElfLibError.FileImageGetFailed;
+    }
+
+    pub fn get_loadable_it(self: *const Elf) !LoadableSectionIt {
+        const data = try self.get_raw_data();
+        const headers = try self.get_program_headers();
+        return LoadableSectionIt.init(data, headers);
     }
 };
-
-// pub fn is_program_header_loadable(header: *const c.Elf64_Phdr) bool {
-//     return header.p_type == c.PT_LOAD;
-// }
 
 pub fn init() !void {
     if (c.elf_version(c.EV_CURRENT) == c.EV_NONE) {

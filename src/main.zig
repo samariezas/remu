@@ -180,11 +180,9 @@ fn load_self(name: [:0]const u8) !void {
     const elf = try libelf.Elf.load(f);
     defer elf.deinit();
 
-    const headers = try elf.get_program_headers();
-    for (headers) |h| {
-        if (try elf.get_loadable_section(&h)) |section| {
-            std.debug.print("{x:0>8}\n", .{section.start_address});
-        }
+    var it = try elf.get_loadable_it();
+    while (it.next()) |section| {
+        std.debug.print("{x:0>8}\n", .{section.start_address});
     }
 }
 
