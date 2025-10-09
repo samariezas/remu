@@ -18,6 +18,8 @@
 
       devShells.${system}.default = pkgs.mkShell {
         buildInputs = with pkgs; [
+          glibc
+          libelf
           zig
         ];
       };
