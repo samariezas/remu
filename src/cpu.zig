@@ -85,7 +85,7 @@ fn InstructionDescriptor(comptime opt: CpuOptions) type {
         const Tcpu = RVCPU(opt);
         const Tword = Tcpu.Tword;
         const InstructionHandler = *const fn (*Tcpu, u32) void;
-        const WriterHandler = *const fn (std.io.AnyWriter, u32) anyerror!void;
+        const WriterHandler = *const fn (std.io.AnyWriter, u32, Tword) anyerror!void;
 
         opcode: u7,
         id: InstructionID,
@@ -96,11 +96,11 @@ fn InstructionDescriptor(comptime opt: CpuOptions) type {
 
         const Self = @This();
 
-        fn print(self: *const Self, writer: std.io.AnyWriter, instruction: u32) !void {
+        fn print(self: *const Self, writer: std.io.AnyWriter, instruction: u32, pc: Tword) !void {
             std.debug.assert((instruction & 0x7f) == self.opcode);
             if (self.writer_fn) |writer_fn| {
                 try writer.print("{s} ", .{self.name});
-                try writer_fn(writer, instruction);
+                try writer_fn(writer, instruction, pc);
                 try writer.writeAll("\n");
             } else {
                 try writer.print("{s} ???\n", .{self.name});
@@ -175,9 +175,13 @@ pub const RTypeInstruction = packed struct {
     rs2: u5,
     funct7: u7,
 
-    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
-        const decoded: @This() = @bitCast(instruction);
-        try writer.print("x{}, x{}, x{}", .{decoded.rd, decoded.rs1, decoded.rs2});
+    fn makeWriter(Tword: type) type{
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: RTypeInstruction = @bitCast(instruction);
+                try writer.print("x{}, x{}, x{}", .{decoded.rd, decoded.rs1, decoded.rs2});
+            }
+        };
     }
 };
 
@@ -188,9 +192,19 @@ const ITypeInstruction = packed struct {
     rs1: u5,
     imm: u12,
 
-    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
-        const decoded: @This() = @bitCast(instruction);
-        try writer.print("x{}, x{}, {}", .{decoded.rd, decoded.rs1, decoded.imm});
+    fn makeWriter(Tword: type) type{
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: ITypeInstruction = @bitCast(instruction);
+                try writer.print("x{}, x{}, {}", .{decoded.rd, decoded.rs1, decoded.imm});
+            }
+
+            fn writeLoad(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: ITypeInstruction = @bitCast(instruction);
+                const signed: i12 = @bitCast(decoded.imm);
+                try writer.print("x{}, {}(x{})", .{decoded.rd, signed, decoded.rs1});
+            }
+        };
     }
 };
 
@@ -208,10 +222,14 @@ const STypeInstruction = packed struct {
         return imm1 | (imm2 << 5);
     }
 
-    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
-        const decoded: @This() = @bitCast(instruction);
-        const signed: i12 = @bitCast(decoded.getImm());
-        try writer.print("x{}, {}(x{})", .{decoded.rs2, signed, decoded.rs1});
+    fn makeWriter(Tword: type) type{
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: STypeInstruction = @bitCast(instruction);
+                const signed: i12 = @bitCast(decoded.getImm());
+                try writer.print("x{}, {}(x{})", .{decoded.rs2, signed, decoded.rs1});
+            }
+        };
     }
 };
 
@@ -220,9 +238,13 @@ const UTypeInstruction = packed struct {
     rd: u5,
     imm: u20,
 
-    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
-        const decoded: @This() = @bitCast(instruction);
-        try writer.print("x{}, 0x{x}", .{decoded.rd, decoded.imm});
+    fn makeWriter(Tword: type) type{
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: UTypeInstruction = @bitCast(instruction);
+                try writer.print("x{}, 0x{x}", .{decoded.rd, decoded.imm});
+            }
+        };
     }
 };
 
@@ -248,12 +270,14 @@ const JTypeInstruction = packed struct {
         return signExtend(Tword, retval);
     }
 
-    fn write(writer: std.io.AnyWriter, instruction: u32) anyerror!void {
-        const decoded: @This() = @bitCast(instruction);
-        const sign = (if (decoded.getSign()) "+" else "-");
-        _ = writer;
-        _ = sign;
-        // try w iter.print("{s}0x{x:0>8}", .{sign, decoded.getImm()});
+    fn makeWriter(Tword: type) type {
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, pc: Tword) anyerror!void {
+                const decoded: JTypeInstruction = @bitCast(instruction);
+                const resulting_pc = pc +% decoded.getImm(Tword);
+                try writer.print("0x{x}", .{resulting_pc});
+            }
+        };
     }
 };
 
@@ -279,6 +303,16 @@ const BTypeInstruction = packed struct {
             (imm4 << 12)
         );
         return signExtend(Tword, retval);
+    }
+
+    fn makeWriter(Tword: type) type {
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, pc: Tword) anyerror!void {
+                const decoded: BTypeInstruction = @bitCast(instruction);
+                const resulting_pc = pc +% decoded.getImm(Tword);
+                try writer.print("x{}, x{}, 0x{x}", .{decoded.rs1, decoded.rs2, resulting_pc});
+            }
+        };
     }
 };
 
@@ -362,54 +396,62 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
             .w64 => Tshamt64,
         };
 
+        const RWriter = RTypeInstruction.makeWriter(Tword).write;
+        const IWriter = ITypeInstruction.makeWriter(Tword).write;
+        const ILoadWriter = ITypeInstruction.makeWriter(Tword).writeLoad;
+        const SWriter = STypeInstruction.makeWriter(Tword).write;
+        const BWriter = BTypeInstruction.makeWriter(Tword).write;
+        const UWriter = UTypeInstruction.makeWriter(Tword).write;
+        const JWriter = JTypeInstruction.makeWriter(Tword).write;
+
         const instructions = [_]Instr {
             // R-type arithmetic/logic
-            Instr.makeF37("ADD",  0b0110011, 0,    0, handleAdd,  RTypeInstruction.write),
-            Instr.makeF37("SUB",  0b0110011, 0, 0x20, handleSub,  RTypeInstruction.write),
-            Instr.makeF37("XOR",  0b0110011, 4,    0, handleXor,  RTypeInstruction.write),
-            Instr.makeF37("OR",   0b0110011, 6,    0, handleOr,   RTypeInstruction.write),
-            Instr.makeF37("AND",  0b0110011, 7,    0, handleAnd,  RTypeInstruction.write),
-            Instr.makeF37("SLL",  0b0110011, 1,    0, handleSll,  RTypeInstruction.write),
-            Instr.makeF37("SRL",  0b0110011, 5,    0, handleSrl,  RTypeInstruction.write),
-            Instr.makeF37("SRA",  0b0110011, 5, 0x20, handleSra,  RTypeInstruction.write),
-            Instr.makeF37("SLT",  0b0110011, 2,    0, handleSlt,  RTypeInstruction.write),
-            Instr.makeF37("SLTU", 0b0110011, 3,    0, handleSltu, RTypeInstruction.write),
+            Instr.makeF37("ADD",  0b0110011, 0,    0, handleAdd,  RWriter),
+            Instr.makeF37("SUB",  0b0110011, 0, 0x20, handleSub,  RWriter),
+            Instr.makeF37("XOR",  0b0110011, 4,    0, handleXor,  RWriter),
+            Instr.makeF37("OR",   0b0110011, 6,    0, handleOr,   RWriter),
+            Instr.makeF37("AND",  0b0110011, 7,    0, handleAnd,  RWriter),
+            Instr.makeF37("SLL",  0b0110011, 1,    0, handleSll,  RWriter),
+            Instr.makeF37("SRL",  0b0110011, 5,    0, handleSrl,  RWriter),
+            Instr.makeF37("SRA",  0b0110011, 5, 0x20, handleSra,  RWriter),
+            Instr.makeF37("SLT",  0b0110011, 2,    0, handleSlt,  RWriter),
+            Instr.makeF37("SLTU", 0b0110011, 3,    0, handleSltu, RWriter),
 
             // I-type arithmetic/logic
-            Instr.makeF3("ADDI",   0b0010011, 0,       handleAddi,  ITypeInstruction.write),
-            Instr.makeF3("XORI",   0b0010011, 4,       handleXori,  ITypeInstruction.write),
-            Instr.makeF3("ORI",    0b0010011, 6,       handleOri,   ITypeInstruction.write),
-            Instr.makeF3("ANDI",   0b0010011, 7,       handleAndi,  ITypeInstruction.write),
-            Instr.makeF3("SLTI",   0b0010011, 2,       handleSlti,  ITypeInstruction.write),
-            Instr.makeF3("SLTIU",  0b0010011, 3,       handleSltiu, ITypeInstruction.write),
+            Instr.makeF3("ADDI",   0b0010011, 0,       handleAddi,  IWriter),
+            Instr.makeF3("XORI",   0b0010011, 4,       handleXori,  IWriter),
+            Instr.makeF3("ORI",    0b0010011, 6,       handleOri,   IWriter),
+            Instr.makeF3("ANDI",   0b0010011, 7,       handleAndi,  IWriter),
+            Instr.makeF3("SLTI",   0b0010011, 2,       handleSlti,  IWriter),
+            Instr.makeF3("SLTIU",  0b0010011, 3,       handleSltiu, IWriter),
 
             // I-type loads
-            Instr.makeF3("LB",  0b0000011, 0, handleLb,  ITypeInstruction.write),
-            Instr.makeF3("LH",  0b0000011, 1, handleLh,  ITypeInstruction.write),
-            Instr.makeF3("LW",  0b0000011, 2, handleLw,  ITypeInstruction.write),
-            Instr.makeF3("LBU", 0b0000011, 4, handleLbu, ITypeInstruction.write),
-            Instr.makeF3("LHU", 0b0000011, 5, handleLhu, ITypeInstruction.write),
+            Instr.makeF3("LB",  0b0000011, 0, handleLb,  ILoadWriter),
+            Instr.makeF3("LH",  0b0000011, 1, handleLh,  ILoadWriter),
+            Instr.makeF3("LW",  0b0000011, 2, handleLw,  ILoadWriter),
+            Instr.makeF3("LBU", 0b0000011, 4, handleLbu, ILoadWriter),
+            Instr.makeF3("LHU", 0b0000011, 5, handleLhu, ILoadWriter),
 
             // S-type stores
-            Instr.makeF3("SB", 0b0100011, 0, handleSb, STypeInstruction.write),
-            Instr.makeF3("SH", 0b0100011, 1, handleSh, STypeInstruction.write),
-            Instr.makeF3("SW", 0b0100011, 2, handleSw, STypeInstruction.write),
+            Instr.makeF3("SB", 0b0100011, 0, handleSb, SWriter),
+            Instr.makeF3("SH", 0b0100011, 1, handleSh, SWriter),
+            Instr.makeF3("SW", 0b0100011, 2, handleSw, SWriter),
 
             // B-type branches
-            Instr.makeF3("BEQ",  0b1100011, 0, handleBeq,  null).noJump(),
-            Instr.makeF3("BNE",  0b1100011, 1, handleBne,  null).noJump(),
-            Instr.makeF3("BLT",  0b1100011, 4, handleBlt,  null).noJump(),
-            Instr.makeF3("BGE",  0b1100011, 5, handleBge,  null).noJump(),
-            Instr.makeF3("BLTU", 0b1100011, 6, handleBltu, null).noJump(),
-            Instr.makeF3("BGEU", 0b1100011, 7, handleBgeu, null).noJump(),
+            Instr.makeF3("BEQ",  0b1100011, 0, handleBeq,  BWriter).noJump(),
+            Instr.makeF3("BNE",  0b1100011, 1, handleBne,  BWriter).noJump(),
+            Instr.makeF3("BLT",  0b1100011, 4, handleBlt,  BWriter).noJump(),
+            Instr.makeF3("BGE",  0b1100011, 5, handleBge,  BWriter).noJump(),
+            Instr.makeF3("BLTU", 0b1100011, 6, handleBltu, BWriter).noJump(),
+            Instr.makeF3("BGEU", 0b1100011, 7, handleBgeu, BWriter).noJump(),
 
             // Jumps
-            Instr.makeNone("JAL", 0b1101111, handleJal, null).noJump(),
-            Instr.makeF3("JALR", 0b1100111, 0, handleJalr, null).noJump(),
+            Instr.makeNone("JAL", 0b1101111, handleJal, JWriter).noJump(),
+            Instr.makeF3("JALR", 0b1100111, 0, handleJalr, JWriter).noJump(),
 
             // U-type loads
-            Instr.makeNone("LUI",   0b0110111, handleLui,   UTypeInstruction.write),
-            Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UTypeInstruction.write),
+            Instr.makeNone("LUI",   0b0110111, handleLui,   UWriter),
+            Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UWriter),
 
             // Misc
             Instr.makeF3("ECALL",   0b1110011, 0, handleEcall, null).noJump(),
@@ -421,9 +463,9 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
                 Instr.makeF3("LD",   0b0000011, 3,    handleLd,  null),
                 Instr.makeF3("SD",   0b0100011, 3,    handleSd,  null),
 
-                Instr.makeF36("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
-                Instr.makeF36("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
-                Instr.makeF36("SRAI",  0b0010011, 5, 0x10, handleSrai,  ITypeInstruction.write),
+                Instr.makeF36("SLLI",  0b0010011, 1, 0,    handleSlli,  IWriter),
+                Instr.makeF36("SRLI",  0b0010011, 5, 0,    handleSrli,  IWriter),
+                Instr.makeF36("SRAI",  0b0010011, 5, 0x10, handleSrai,  IWriter),
 
                 Instr.makeF3("ADDIW",  0b0011011, 0,       handleAddiw, null),
                 Instr.makeF37("SLLIW", 0b0011011, 1, 0,    handleSlliw, null),
@@ -437,26 +479,26 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
                 Instr.makeF37("SRAW",  0b0111011, 5, 0x20, handleSraw, null),
             } else [_]Instr {}) ++
             (if (opt.word_size == .w32) [_]Instr {
-                Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  ITypeInstruction.write),
-                Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  ITypeInstruction.write),
-                Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  ITypeInstruction.write),
+                Instr.makeF37("SLLI",  0b0010011, 1, 0,    handleSlli,  IWriter),
+                Instr.makeF37("SRLI",  0b0010011, 5, 0,    handleSrli,  IWriter),
+                Instr.makeF37("SRAI",  0b0010011, 5, 0x20, handleSrai,  IWriter),
             } else [_]Instr {}) ++
             (if (opt.m_extension) [_]Instr {
-                Instr.makeF37("MUL",   0b0110011, 0, 1,    handleMul,   RTypeInstruction.write),
-                Instr.makeF37("MULH",  0b0110011, 1, 1,    handleMulh,  RTypeInstruction.write),
-                Instr.makeF37("MULHSU",0b0110011, 2, 1,    handleMulhsu,RTypeInstruction.write),
-                Instr.makeF37("MULHU", 0b0110011, 3, 1,    handleMulhu, RTypeInstruction.write),
-                Instr.makeF37("DIV",   0b0110011, 4, 1,    handleDiv,   RTypeInstruction.write),
-                Instr.makeF37("DIVU",  0b0110011, 5, 1,    handleDivu,  RTypeInstruction.write),
-                Instr.makeF37("REM",   0b0110011, 6, 1,    handleRem,   RTypeInstruction.write),
-                Instr.makeF37("REMU",  0b0110011, 7, 1,    handleRemu,  RTypeInstruction.write),
+                Instr.makeF37("MUL",   0b0110011, 0, 1,    handleMul,   RWriter),
+                Instr.makeF37("MULH",  0b0110011, 1, 1,    handleMulh,  RWriter),
+                Instr.makeF37("MULHSU",0b0110011, 2, 1,    handleMulhsu,RWriter),
+                Instr.makeF37("MULHU", 0b0110011, 3, 1,    handleMulhu, RWriter),
+                Instr.makeF37("DIV",   0b0110011, 4, 1,    handleDiv,   RWriter),
+                Instr.makeF37("DIVU",  0b0110011, 5, 1,    handleDivu,  RWriter),
+                Instr.makeF37("REM",   0b0110011, 6, 1,    handleRem,   RWriter),
+                Instr.makeF37("REMU",  0b0110011, 7, 1,    handleRemu,  RWriter),
             } else [_]Instr {}) ++
             (if (opt.word_size == .w64 and opt.m_extension) [_]Instr {
-                Instr.makeF37("MULW",  0b0111011, 0, 1,    handleMulw,  RTypeInstruction.write),
-                Instr.makeF37("DIVW",  0b0111011, 4, 1,    handleDivw,  RTypeInstruction.write),
-                Instr.makeF37("DIVUW", 0b0111011, 5, 1,    handleDivuw, RTypeInstruction.write),
-                Instr.makeF37("REMW",  0b0111011, 6, 1,    handleRemw,  RTypeInstruction.write),
-                Instr.makeF37("REMUW", 0b0111011, 7, 1,    handleRemuw, RTypeInstruction.write),
+                Instr.makeF37("MULW",  0b0111011, 0, 1,    handleMulw,  RWriter),
+                Instr.makeF37("DIVW",  0b0111011, 4, 1,    handleDivw,  RWriter),
+                Instr.makeF37("DIVUW", 0b0111011, 5, 1,    handleDivuw, RWriter),
+                Instr.makeF37("REMW",  0b0111011, 6, 1,    handleRemw,  RWriter),
+                Instr.makeF37("REMUW", 0b0111011, 7, 1,    handleRemuw, RWriter),
             } else [_]Instr {});
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -504,7 +546,7 @@ pub fn RVCPU(comptime opt: CpuOptions) type {
             try self.writer.print("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
             for (instructions) |i| {
                 if (matches(instruction_id, &i)) {
-                    try i.print(self.writer, instruction);
+                    try i.print(self.writer, instruction, self.pc);
                     i.handler(self, instruction);
                     try self.writeRegisters(self.writer, 4);
                     if (i.advance_pc) {
