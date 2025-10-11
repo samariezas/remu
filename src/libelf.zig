@@ -117,42 +117,21 @@ pub const Elf = struct {
             section = c.elf_nextscn(self.inner, section);
             if (section == null) { break; }
             const header = c.elf64_getshdr(section);
-            if (header == null) { return ElfLibError.ReadingSectionHeaderFailed; }
             if (header.*.sh_type == c.SHT_SYMTAB) {
                 const data = c.elf_getdata(section, null);
                 const count = header.*.sh_size / header.*.sh_entsize;
                 const string_section = c.elf_getscn(self.inner, header.*.sh_link);
                 const string_data: [*c]const u8 = @ptrCast(c.elf_getdata(string_section, null).*.d_buf);
-                std.debug.print("Symbol count: {}\n", .{count});
-                for (0..count) |i| {
-                    var symbol: c.GElf_Sym = undefined;
-                    std.debug.assert(c.gelf_getsym(data, @intCast(i), &symbol) != null);
+                const symbols_raw: [*c]const c.Elf64_Sym = @ptrCast(@alignCast(data.*.d_buf));
+                const symbols = symbols_raw[0..count];
+                std.debug.print("\nSymbol count: {}\n", .{count});
+                for (symbols, 0..) |symbol, i| {
                     const name_length = c.strlen(string_data + symbol.st_name);
                     const name = string_data[symbol.st_name..(symbol.st_name+name_length)];
                     if (name_length > 0) {
                         std.debug.print("{}: {s}\n", .{i+1, name});
                     }
                 }
-                // Elf_Data *data = elf_getdata(scn, NULL);
-                // int count = shdr.sh_size / shdr.sh_entsize;
-                //
-                // // Get the string table for symbol names
-                // Elf_Scn *strscn = elf_getscn(elf, shdr.sh_link);
-                // Elf_Data *strdata = elf_getdata(strscn, NULL);
-                //
-                // printf("Section: %s\n", 
-                //     (shdr.sh_type == SHT_SYMTAB) ? ".symtab" : ".dynsym");
-                // printf("Num symbols: %d\n", count);
-                //
-                // for (int i = 0; i < count; i++) {
-                //     GElf_Sym sym;
-                //     gelf_getsym(data, i, &sym);
-                //     const char *name = (const char *) strdata->d_buf + sym.st_name;
-                //
-                //     if (strlen(name) > 0) {
-                //         printf("%016lx  %s\n", (unsigned long) sym.st_value, name);
-                //     }
-                // }
             }
         }
     }

@@ -11,7 +11,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.addWriteFiles().add( "libelf_binding.h",
             \\#include <string.h>
             \\#include <libelf.h>
-            \\#include <gelf.h>
         ),
     });
 
