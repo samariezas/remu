@@ -8,9 +8,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = false,
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.addWriteFiles().add(
-            "libelf_binding.h",
-            "#include <libelf.h>"
+        .root_source_file = b.addWriteFiles().add( "libelf_binding.h",
+            \\#include <string.h>
+            \\#include <libelf.h>
+            \\#include <gelf.h>
         ),
     });
 

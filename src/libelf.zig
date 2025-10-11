@@ -12,14 +12,16 @@ const ElfLibError = error {
     GetProgramHeaderCountFailed,
     GetProgramHeadersFailed,
     FileImageGetFailed,
+    ReadingSectionHeaderFailed,
 };
 
+// TODO: section -> segment
 pub const LoadableSectionIt = struct {
-    elf_data: [*c]const u8,
+    elf_data: []const u8,
     program_headers: []const c.Elf64_Phdr,
     current_header_idx: usize,
 
-    fn init(elf_data: [*c]const u8, program_headers: []const c.Elf64_Phdr) LoadableSectionIt {
+    fn init(elf_data: []const u8, program_headers: []const c.Elf64_Phdr) LoadableSectionIt {
         return .{
             .elf_data = elf_data,
             .program_headers = program_headers,
@@ -32,6 +34,7 @@ pub const LoadableSectionIt = struct {
             const header = self.program_headers[self.current_header_idx];
             self.current_header_idx += 1;
             if (header.p_type == c.PT_LOAD) {
+                std.debug.print("\nSection offset: {x}\n", .{header.p_offset});
                 return .{
                     .data = self.elf_data[header.p_offset..(header.p_offset+header.p_filesz)],
                     .start_address = header.p_vaddr,
@@ -94,9 +97,10 @@ pub const Elf = struct {
         }
     }
 
-    fn get_raw_data(self: *const Elf) ![*c]u8 {
-        if (c.elf_rawfile(self.inner, null)) |data| {
-            return data;
+    fn get_raw_data(self: *const Elf) ![]const u8 {
+        var size: usize = undefined;
+        if (c.elf_rawfile(self.inner, &size)) |data| {
+            return data[0..size];
         }
         return ElfLibError.FileImageGetFailed;
     }
@@ -105,6 +109,52 @@ pub const Elf = struct {
         const data = try self.get_raw_data();
         const headers = try self.get_program_headers();
         return LoadableSectionIt.init(data, headers);
+    }
+
+    pub fn print_symbols(self: *const Elf) !void {
+        var section: ?*c.Elf_Scn = null;
+        while (true) {
+            section = c.elf_nextscn(self.inner, section);
+            if (section == null) { break; }
+            const header = c.elf64_getshdr(section);
+            if (header == null) { return ElfLibError.ReadingSectionHeaderFailed; }
+            if (header.*.sh_type == c.SHT_SYMTAB) {
+                const data = c.elf_getdata(section, null);
+                const count = header.*.sh_size / header.*.sh_entsize;
+                const string_section = c.elf_getscn(self.inner, header.*.sh_link);
+                const string_data: [*c]const u8 = @ptrCast(c.elf_getdata(string_section, null).*.d_buf);
+                std.debug.print("Symbol count: {}\n", .{count});
+                for (0..count) |i| {
+                    var symbol: c.GElf_Sym = undefined;
+                    std.debug.assert(c.gelf_getsym(data, @intCast(i), &symbol) != null);
+                    const name_length = c.strlen(string_data + symbol.st_name);
+                    const name = string_data[symbol.st_name..(symbol.st_name+name_length)];
+                    if (name_length > 0) {
+                        std.debug.print("{}: {s}\n", .{i+1, name});
+                    }
+                }
+                // Elf_Data *data = elf_getdata(scn, NULL);
+                // int count = shdr.sh_size / shdr.sh_entsize;
+                //
+                // // Get the string table for symbol names
+                // Elf_Scn *strscn = elf_getscn(elf, shdr.sh_link);
+                // Elf_Data *strdata = elf_getdata(strscn, NULL);
+                //
+                // printf("Section: %s\n", 
+                //     (shdr.sh_type == SHT_SYMTAB) ? ".symtab" : ".dynsym");
+                // printf("Num symbols: %d\n", count);
+                //
+                // for (int i = 0; i < count; i++) {
+                //     GElf_Sym sym;
+                //     gelf_getsym(data, i, &sym);
+                //     const char *name = (const char *) strdata->d_buf + sym.st_name;
+                //
+                //     if (strlen(name) > 0) {
+                //         printf("%016lx  %s\n", (unsigned long) sym.st_value, name);
+                //     }
+                // }
+            }
+        }
     }
 };
 

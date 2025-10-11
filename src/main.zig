@@ -173,17 +173,29 @@ pub fn runMultipleSuites(
     try printResults(&results, writer);
 }
 
-fn load_self(name: [:0]const u8) !void {
+fn printBinary(data: []const u8, offset: u64) void {
+    var i: usize = 0;
+    while (i < data.len) {
+        if (i % 0x10 == 0) {
+            std.debug.print("\n{x:0>8} ", .{ offset + i });
+        }
+        std.debug.print("{x:0>2}", .{ data[i] });
+        if (i % 4 == 3) { std.debug.print(" ", .{}); }
+        i += 1;
+    }
+}
+
+pub fn loadElf(path: []const u8) !void {
     try libelf.init();
-    const f = try std.fs.cwd().openFile(name, std.fs.File.OpenFlags { .mode = .read_only });
-    errdefer f.close();
+    const f = try std.fs.cwd().openFile(path, std.fs.File.OpenFlags { .mode = .read_only });
     const elf = try libelf.Elf.load(f);
     defer elf.deinit();
-
     var it = try elf.get_loadable_it();
     while (it.next()) |section| {
-        std.debug.print("{x:0>8}\n", .{section.start_address});
+        std.debug.print("\n\n---\n", .{});
+        printBinary(section.data, section.start_address);
     }
+    try elf.print_symbols();
 }
 
 pub fn main() !void {
@@ -199,29 +211,31 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    _ = arena_allocator;
     var args = std.process.args();
-    try load_self(args.next().?);
-    // std.debug.assert(args.skip());
-    // const run_type = args.next() orelse @panic("Missing run type argument");
-    // const stdout_writer = std.io.getStdOut().writer().any();
-    // if (std.mem.eql(u8, run_type, "single")) {
-    //     const image = args.next() orelse @panic("Missing image argument");
-    //     std.debug.assert(!args.skip());
-    //     try runSingle(base64.withM(), allocator, image, std.fs.cwd(), stdout_writer);
-    // } else if (std.mem.eql(u8, run_type, "multi")) {
-    //     const start = args.next() orelse @panic("Missing start of name argument");
-    //     const path = args.next() orelse @panic("Missing path argument");
-    //     std.debug.assert(!args.skip());
-    //     const results = [_]TestSuiteResult {
-    //         try runMulti(base64, allocator, arena_allocator, start, path, stdout_writer),
-    //     };
-    //     try printResults(&results, stdout_writer);
-    // } else if (std.mem.eql(u8, run_type, "full")) {
-    //     const path = args.next() orelse @panic("Missing path argument");
-    //     std.debug.assert(!args.skip());
-    //     try runMultipleSuites(allocator, arena_allocator, path, stdout_writer);
-    // } else {
-    //     @panic("Unknown run type");
-    // }
+    std.debug.assert(args.skip());
+    const run_type = args.next() orelse @panic("Missing run type argument");
+    const stdout_writer = std.io.getStdOut().writer().any();
+    if (std.mem.eql(u8, run_type, "dumpelf")) {
+        const image = args.next() orelse @panic("Missing image argument");
+        std.debug.assert(!args.skip());
+        try loadElf(image);
+    } else if (std.mem.eql(u8, run_type, "single")) {
+        const image = args.next() orelse @panic("Missing image argument");
+        std.debug.assert(!args.skip());
+        try runSingle(base64.withM(), allocator, image, std.fs.cwd(), stdout_writer);
+    } else if (std.mem.eql(u8, run_type, "multi")) {
+        const start = args.next() orelse @panic("Missing start of name argument");
+        const path = args.next() orelse @panic("Missing path argument");
+        std.debug.assert(!args.skip());
+        const results = [_]TestSuiteResult {
+            try runMulti(base64, allocator, arena_allocator, start, path, stdout_writer),
+        };
+        try printResults(&results, stdout_writer);
+    } else if (std.mem.eql(u8, run_type, "full")) {
+        const path = args.next() orelse @panic("Missing path argument");
+        std.debug.assert(!args.skip());
+        try runMultipleSuites(allocator, arena_allocator, path, stdout_writer);
+    } else {
+        @panic("Unknown run type");
+    }
 }
