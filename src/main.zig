@@ -188,14 +188,17 @@ fn printBinary(data: []const u8, offset: u64) void {
 pub fn loadElf(path: []const u8) !void {
     try libelf.init();
     const f = try std.fs.cwd().openFile(path, std.fs.File.OpenFlags { .mode = .read_only });
-    const elf = try libelf.Elf.load(f);
+    var elf = try libelf.Elf.load(f);
     defer elf.deinit();
     var it = try elf.get_loadable_it();
     while (it.next()) |section| {
         std.debug.print("\n\n---\n", .{});
         printBinary(section.data, section.start_address);
     }
-    try elf.print_symbols();
+    var symbol_it = try elf.getSymbols();
+    while (symbol_it.next()) |symbol| {
+        std.debug.print("{x:0>8} {x:0>8} {s}\n", .{symbol.address, symbol.size, symbol.name});
+    }
 }
 
 pub fn main() !void {

@@ -52,6 +52,60 @@ pub const LoadableSection = struct {
     padding: u64,
 };
 
+pub const Symbol = struct {
+    name: []const u8,
+    address: u64,
+    size: u64
+};
+
+pub const SymbolIt = struct {
+    current_idx: usize,
+    symbols: []const c.Elf64_Sym,
+    string_data: [*c]const u8,
+
+    fn init(elf: *c.Elf) !SymbolIt {
+        var section: ?*c.Elf_Scn = null;
+        var symtab_section_count: usize = 0;
+        var return_value: ?SymbolIt = null;
+        while (true) {
+            section = c.elf_nextscn(elf, section);
+            if (section == null) { break; }
+            const header = c.elf64_getshdr(section);
+            if (header.*.sh_type == c.SHT_SYMTAB) {
+                symtab_section_count += 1;
+                const count = header.*.sh_size / header.*.sh_entsize;
+                const data = c.elf_getdata(section, null);
+                const string_section = c.elf_getscn(elf, header.*.sh_link);
+                const string_data: [*c]const u8 = @ptrCast(c.elf_getdata(string_section, null).*.d_buf);
+                const symbols_raw: [*c]const c.Elf64_Sym = @ptrCast(@alignCast(data.*.d_buf));
+                const symbols = symbols_raw[0..count];
+                return_value = .{
+                    .current_idx = 0,
+                    .symbols = symbols,
+                    .string_data = string_data,
+                };
+            }
+        }
+        if (symtab_section_count != 1) { return error.SymtabSearchFailed; }
+        return return_value.?;
+    }
+
+    pub fn next(self: *SymbolIt) ?Symbol {
+        if (self.current_idx < self.symbols.len) {
+            const symbol = self.symbols[self.current_idx];
+            const name_length = c.strlen(self.string_data + symbol.st_name);
+            const name = self.string_data[symbol.st_name..(symbol.st_name+name_length)];
+            self.current_idx += 1;
+            return .{
+                .name = name,
+                .address = symbol.st_value,
+                .size = symbol.st_size,
+            };
+        }
+        return null;
+    }
+};
+
 pub const Elf = struct {
     file: fs.File,
     inner: *c.Elf,
@@ -111,29 +165,8 @@ pub const Elf = struct {
         return LoadableSectionIt.init(data, headers);
     }
 
-    pub fn print_symbols(self: *const Elf) !void {
-        var section: ?*c.Elf_Scn = null;
-        while (true) {
-            section = c.elf_nextscn(self.inner, section);
-            if (section == null) { break; }
-            const header = c.elf64_getshdr(section);
-            if (header.*.sh_type == c.SHT_SYMTAB) {
-                const data = c.elf_getdata(section, null);
-                const count = header.*.sh_size / header.*.sh_entsize;
-                const string_section = c.elf_getscn(self.inner, header.*.sh_link);
-                const string_data: [*c]const u8 = @ptrCast(c.elf_getdata(string_section, null).*.d_buf);
-                const symbols_raw: [*c]const c.Elf64_Sym = @ptrCast(@alignCast(data.*.d_buf));
-                const symbols = symbols_raw[0..count];
-                std.debug.print("\nSymbol count: {}\n", .{count});
-                for (symbols, 0..) |symbol, i| {
-                    const name_length = c.strlen(string_data + symbol.st_name);
-                    const name = string_data[symbol.st_name..(symbol.st_name+name_length)];
-                    if (name_length > 0) {
-                        std.debug.print("{}: {s}\n", .{i+1, name});
-                    }
-                }
-            }
-        }
+    pub fn getSymbols(self: *Elf) !SymbolIt {
+        return SymbolIt.init(self.inner);
     }
 };
 
