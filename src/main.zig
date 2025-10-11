@@ -1,9 +1,10 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
+const cpu_config = cpu.cpu_config;
 const tests = @import("tests.zig");
 const libelf = @import("libelf.zig");
-const CpuOptions = cpu.CpuOptions;
-const WordSize = cpu.WordSize;
+const CpuOptions = cpu_config.CpuOptions;
+const WordSize = cpu_config.WordSize;
 const linux = std.os.linux;
 
 const base32 = CpuOptions.makeBase(WordSize.w32);
@@ -188,7 +189,7 @@ fn printBinary(data: []const u8, offset: u64) void {
 pub fn loadElf(path: []const u8) !void {
     try libelf.init();
     const f = try std.fs.cwd().openFile(path, std.fs.File.OpenFlags { .mode = .read_only });
-    var elf = try libelf.Elf.load(f);
+    var elf = try libelf.Elf(.w64).load(f);
     defer elf.deinit();
     var it = try elf.get_loadable_it();
     while (it.next()) |section| {

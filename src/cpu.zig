@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const cpu_config = @import("cpu_config.zig");
 const Allocator = std.mem.Allocator;
 const LittleEndian = std.builtin.Endian.little;
 
@@ -80,7 +81,7 @@ const InstructionID = union(enum) {
     funct_3_6: struct { funct3: u3, funct6: u6 },
 };
 
-fn InstructionDescriptor(comptime opt: CpuOptions) type {
+fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
     return struct {
         const Tcpu = RVCPU(opt);
         const Tword = Tcpu.Tword;
@@ -332,38 +333,10 @@ pub fn TestResult(comptime Tword: type) type {
     };
 }
 
-pub const WordSize = enum {
-    w32,
-    w64,
-};
-
-pub const CpuOptions = struct {
-    const Self = @This();
-
-    word_size: WordSize,
-    m_extension: bool,
-
-    pub fn makeBase(word_size: WordSize) CpuOptions {
-        return .{
-            .word_size = word_size,
-            .m_extension = false,
-        };
-    }
-
-    pub fn withM(self: Self) Self {
-        var new = self;
-        new.m_extension = true;
-        return new;
-    }
-};
-
-pub fn RVCPU(comptime opt: CpuOptions) type {
+pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
     return struct {
         const Self = @This();
-        pub const Tword = switch (opt.word_size) {
-            .w32 => u32,
-            .w64 => u64,
-        };
+        pub const Tword = opt.getTword();
 
         allocator: Allocator,
         registers: [32]Tword,

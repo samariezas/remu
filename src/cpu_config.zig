@@ -1,0 +1,36 @@
+pub const WordSize = enum {
+    w32,
+    w64,
+
+    pub fn getTword(comptime self: WordSize) type {
+        return switch (self) {
+            .w32 => u32,
+            .w64 => u64,
+        };
+    }
+};
+
+pub const CpuOptions = struct {
+    const Self = @This();
+
+    word_size: WordSize,
+    m_extension: bool,
+
+    pub fn makeBase(word_size: WordSize) CpuOptions {
+        return .{
+            .word_size = word_size,
+            .m_extension = false,
+        };
+    }
+
+    pub fn withM(self: Self) Self {
+        var new = self;
+        new.m_extension = true;
+        return new;
+    }
+
+    pub fn getTword(comptime self: Self) type {
+        return self.word_size.getTword();
+    }
+};
+
