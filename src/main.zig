@@ -200,6 +200,11 @@ pub fn loadElf(path: []const u8) !void {
     while (symbol_it.next()) |symbol| {
         std.debug.print("{x:0>8} {x:0>8} {s}\n", .{symbol.address, symbol.size, symbol.name});
     }
+    const symbol_struct = try elf.getSymbolsMultiple(&[_][:0]const u8{"begin_signature", "end_signature"});
+    if (symbol_struct) |syms| {
+        std.debug.print("Begin signature: {s} {x:0>8} {x:0>8}\n", .{syms.begin_signature.name, syms.begin_signature.address, syms.begin_signature.size});
+        std.debug.print("End signature:   {s} {x:0>8} {x:0>8}\n", .{syms.end_signature.name, syms.end_signature.address, syms.end_signature.size});
+    }
 }
 
 pub fn main() !void {

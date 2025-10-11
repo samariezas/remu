@@ -33,7 +33,7 @@ pub fn LoadableSegmentIt(comptime c: anytype) type {
             };
         }
 
-        pub fn next(self: *Self) ?LoadableSegment(c) {
+        pub fn next(self: *Self) ?LoadableSegment(c.Tword) {
             while (self.current_header_idx < self.program_headers.len) {
                 const header = self.program_headers[self.current_header_idx];
                 self.current_header_idx += 1;
@@ -50,19 +50,19 @@ pub fn LoadableSegmentIt(comptime c: anytype) type {
     };
 }
 
-pub fn LoadableSegment(comptime c: anytype) type {
+pub fn LoadableSegment(Tword: type) type {
     return struct {
         data: []const u8,
-        start_address: c.Tword,
-        padding: c.Tword,
+        start_address: Tword,
+        padding: Tword,
     };
 }
 
-pub fn Symbol(comptime c: anytype) type {
+pub fn Symbol(Tword: type) type {
     return struct {
         name: []const u8,
-        address: c.Tword,
-        size: c.Tword
+        address: Tword,
+        size: Tword
     };
 }
 
@@ -100,7 +100,7 @@ pub fn SymbolIt(comptime c: anytype) type {
             return return_value.?;
         }
 
-        pub fn next(self: *Self) ?Symbol(c) {
+        pub fn next(self: *Self) ?Symbol(c.Tword) {
             if (self.current_idx < self.symbols.len) {
                 const symbol = self.symbols[self.current_idx];
                 const name_length = c.strlen(self.string_data + symbol.st_name);
@@ -182,6 +182,53 @@ pub fn Elf(comptime wordsize: WordSize) type {
 
         pub fn getSymbols(self: *Self) !SymbolIt(c) {
             return SymbolIt(c).init(self.inner);
+        }
+
+        fn getSymbolType(comptime symbols: []const [:0]const u8) type {
+            var output_struct_fields: [symbols.len]std.builtin.Type.StructField = undefined;
+            inline for (symbols, 0..) |symbol, i| {
+                output_struct_fields[i] = .{
+                    .name = symbol,
+                    .type = Symbol(c.Tword), // TODO: undo what I did because of this
+                    .default_value_ptr = null,
+                    .is_comptime = false,
+                    .alignment = 0,
+                };
+            }
+            return @Type(.{
+                .@"struct" = .{
+                    .layout = .auto,
+                    .fields = &output_struct_fields,
+                    .decls = &.{},
+                    .is_tuple = false,
+                },
+            });
+        }
+
+        pub fn getSymbolsMultiple(self: *Self, comptime symbols: []const [:0]const u8) !?(getSymbolType(symbols)) {
+            var it = try self.getSymbols();
+            const Tstruct = getSymbolType(symbols);
+            var result = std.mem.zeroes(Tstruct);
+            const result_base = @intFromPtr(&result);
+            var filled = [_]bool{false} ** symbols.len; // TODO: there must be a better function
+            while (it.next()) |symbol| {
+                inline for (symbols, 0..) |symbol_dest_name, i| {
+                    if (std.mem.eql(u8, symbol.name, symbol_dest_name)) {
+                        if (filled[i]) {
+                            return error.DuplicateSymbol;
+                        }
+                        filled[i] = true;
+                        const symbol_dest: *Symbol(c.Tword) = @ptrFromInt(result_base + @offsetOf(Tstruct, symbol_dest_name));
+                        symbol_dest.name = symbol.name;
+                        symbol_dest.address = symbol.address;
+                        symbol_dest.size = symbol.size;
+                    }
+                }
+            }
+            if (!std.mem.allEqual(bool, &filled, true)) {
+                return null;
+            }
+            return result;
         }
     };
 }
