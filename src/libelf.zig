@@ -7,8 +7,6 @@ const WordSize = @import("cpu_config.zig").WordSize;
 var library_initialized: bool = false;
 
 const ElfLibError = error {
-    InitializationFailed,
-    NotInitialized,
     ElfReadingFailed,
     UnexpectedType,
     GetProgramHeaderCountFailed,
@@ -131,9 +129,17 @@ pub fn Elf(comptime wordsize: WordSize) type {
             self.file.close();
         }
 
+        pub fn getEntrypoint(self: *const Self) c.Tword {
+            const header = c.elf_getehdr(self.inner);
+            return header.*.e_entry;
+        }
+
         pub fn load(file: fs.File) !Self {
             if (!library_initialized) {
-                return ElfLibError.NotInitialized;
+                if (!bindings.initializeLibrary()) {
+                    @panic("Failed initializing libelf");
+                }
+                library_initialized = true;
             }
             const elf_nullable: ?*c.Elf = c.elf_begin(file.handle, c.ELF_C_READ, null);
             if (elf_nullable) |elf| {
@@ -232,11 +238,3 @@ pub fn Elf(comptime wordsize: WordSize) type {
         }
     };
 }
-
-pub fn init() !void {
-    if (!bindings.initializeLibrary()) {
-        return ElfLibError.InitializationFailed;
-    }
-    library_initialized = true;
-}
-

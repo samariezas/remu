@@ -58,20 +58,6 @@ in rec {
     '';
   });
 
-  riscv-tests-bin = riscvPkgs.stdenv.mkDerivation {
-    name = "riscv-tests-bin";
-    src = riscv-tests-elf;
-
-    buildPhase = ''
-      mkdir -p $out/share/riscv-tests/{isa,mt,benchmarks}
-      FLIST=$(find . -type f | grep -v "\.dump$" | sed -e '/readme.txt$/d' -e '/Makefile$/d' -e '/\.gitignore$/d')
-      for BIN in $FLIST
-      do
-        riscv64-none-elf-objcopy -O binary $BIN $out/$BIN.bin
-      done
-    '';
-  };
-
   riscv-tests-signatures = pkgs.stdenv.mkDerivation {
     name = "riscv-tests-signatures";
     src = riscv-tests-orig;
@@ -103,7 +89,6 @@ in rec {
     name = "riscv-tests";
     paths = [
       riscv-tests-elf
-      riscv-tests-bin
       riscv-tests-signatures
     ];
   };

@@ -322,10 +322,6 @@ pub fn TestResult(comptime Tword: type) type {
         const Self = @This();
 
         a0: Tword,
-        signature_address: ?struct {
-            start: Tword,
-            length: Tword,
-        },
 
         pub fn is_success(self: *const Self) bool {
             return self.a0 == 0;
@@ -344,6 +340,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         bus: Bus(Tword),
         test_result: ?TestResult(Tword),
         writer: std.io.AnyWriter,
+        signature_start: Tword,
+        signature_end: Tword,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -539,18 +537,36 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
 
-        pub fn loadBinary(self: *Self, entrypoint: Tword, buffer: []u8) !void {
-            try self.bus.writeMemory(entrypoint, buffer);
+        pub fn loadData(self: *Self, start: Tword, buffer: []const u8) !void {
+            try self.bus.writeMemory(start, buffer);
         }
 
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, writer: std.io.AnyWriter) !RVCPU(opt) {
+        pub fn loadZeroes(self: *Self, start: Tword, count: Tword) !void {
+            _ = self;
+            _ = start;
+            if (count > 0) {
+                @panic("padZeroes is not implemented");
+            }
+        }
+
+        pub fn init(
+            allocator: Allocator,
+            entrypoint: Tword,
+            memory_start: Tword,
+            memory_length: Tword,
+            writer: std.io.AnyWriter,
+            signature_start: Tword,
+            signature_end: Tword
+        ) !RVCPU(opt) {
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
-                .pc = memory_start,
+                .pc = entrypoint,
                 .bus = try Bus(Tword).init(allocator, memory_start, memory_length),
                 .test_result = null,
                 .writer = writer,
+                .signature_start = signature_start,
+                .signature_end = signature_end,
             };
         }
 
@@ -558,7 +574,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.bus.deinit(self.allocator);
         }
 
-        pub fn isHalted(self: *Self) bool {
+        pub fn isHalted(self: *const Self) bool {
             return self.test_result != null;
         }
 
@@ -573,10 +589,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         pub fn getSignature(self: *Self, allocator: Allocator) ![]u8 {
             std.debug.assert(self.isHalted());
-            const signature = self.test_result.?.signature_address.?;
-            const buffer: []u8 = try allocator.alloc(u8, @intCast(signature.length));
-            try self.bus.readMemory(signature.start, buffer);
+            const signature_length = self.signature_end - self.signature_start;
+            const buffer: []u8 = try allocator.alloc(u8, @intCast(signature_length));
+            try self.bus.readMemory(self.signature_start, buffer);
             return buffer;
+        }
+
+        pub fn signatureNeeded(self: *Self) bool {
+            return self.signature_start != self.signature_end;
         }
 
         fn handleAdd(self: *Self, instruction: u32) void {
@@ -1010,18 +1030,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleEcall(self: *Self, instruction: u32) void {
             _ = instruction;
             std.debug.assert(!self.isHalted());
-            const memory_start = self.getRegister(11);
-            const memory_end = self.getRegister(12);
             self.test_result = TestResult(Tword) {
                 .a0 = self.getRegister(10),
-                .signature_address = null,
             };
-            if (self.test_result.?.is_success()) {
-                self.test_result.?.signature_address = if (memory_start == memory_end) null else .{
-                    .start = memory_start,
-                    .length = memory_end - memory_start,
-                };
-            }
         }
 
         fn handleMul(self: *Self, instruction: u32) void {

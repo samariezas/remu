@@ -32,9 +32,11 @@ pub fn LibElfInterface(comptime wordsize: WordSize) type {
         elf_version: @TypeOf(c.elf_version),
 
         Elf_Phdr: type,
+        Elf_Ehdr: type,
         Elf_Sym: type,
         elf_getphdr: (if (use_64bit) @TypeOf(c.elf64_getphdr) else @TypeOf(c.elf32_getphdr)),
         elf_getshdr: (if (use_64bit) @TypeOf(c.elf64_getshdr) else @TypeOf(c.elf32_getshdr)),
+        elf_getehdr: (if (use_64bit) @TypeOf(c.elf64_getehdr) else @TypeOf(c.elf32_getehdr)),
     };
 }
 
@@ -64,8 +66,10 @@ pub fn LibElf(comptime wordsize: WordSize) LibElfInterface(wordsize) {
         .elf_version = c.elf_version,
 
         .Elf_Phdr = if (use_64bit) c.Elf64_Phdr else c.Elf32_Phdr,
+        .Elf_Ehdr = if (use_64bit) c.Elf64_Ehdr else c.Elf32_Ehdr,
         .Elf_Sym = if (use_64bit) c.Elf64_Sym else c.Elf32_Sym,
         .elf_getphdr = if (use_64bit) c.elf64_getphdr else c.elf32_getphdr,
         .elf_getshdr = if (use_64bit) c.elf64_getshdr else c.elf32_getshdr,
+        .elf_getehdr = if (use_64bit) c.elf64_getehdr else c.elf32_getehdr,
     };
 }

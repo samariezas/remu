@@ -26,22 +26,36 @@ pub fn runSingle(
     working_directory: std.fs.Dir,
     writer: std.io.AnyWriter
 ) !void {
+    const f = try working_directory.openFile(
+        image, .{ .mode = .read_only }
+    );
+    defer f.close();
+    var elf_file = try libelf.Elf(opt.word_size).load(f);
+
+    const signature_info = try elf_file.getSymbolsMultiple(
+        &[_][:0]const u8{"begin_signature", "end_signature"}
+    ) orelse @panic("Failed reading signature data");
+
     const cpu_type = cpu.RVCPU(opt);
-    const entrypoint: cpu_type.Tword = 0x8000_0000;
+    const memory_start: cpu_type.Tword = 0x8000_0000;
     const memory_size: cpu_type.Tword = 1024*1024;
-    var rvcpu = try cpu_type.init(allocator, entrypoint, memory_size, writer);
+    var rvcpu = try cpu_type.init(
+        allocator,
+        elf_file.getEntrypoint(),
+        memory_start,
+        memory_size,
+        writer,
+        signature_info.begin_signature.address,
+        signature_info.end_signature.address,
+    );
     defer rvcpu.deinit();
 
-    const buffer = try allocator.alloc(u8, @intCast(memory_size));
-    defer allocator.free(buffer);
-
-    const file_read = try working_directory.readFile(image, buffer);
-    
-    if (file_read.len >= buffer.len) {
-        @panic("Buffer too small");
+    var it = try elf_file.get_loadable_it();
+    while (it.next()) |segment| {
+        try rvcpu.loadData(segment.start_address, segment.data);
+        const offset: cpu_type.Tword = @intCast(segment.data.len);
+        try rvcpu.loadZeroes(segment.start_address + offset, segment.padding);
     }
-
-    try rvcpu.loadBinary(entrypoint, file_read);
 
     while (!rvcpu.isHalted()) {
         try rvcpu.tick();
@@ -53,6 +67,7 @@ pub fn runSingle(
     }
 
     if (try tests.loadSignature(allocator, image, working_directory)) |signature| {
+        std.debug.assert(rvcpu.signatureNeeded());
         defer allocator.free(signature);
         const our_signature = try rvcpu.getSignature(allocator);
         defer allocator.free(our_signature);
@@ -64,6 +79,7 @@ pub fn runSingle(
             std.debug.print("Signatures match\n", .{});
         }
     } else {
+        std.debug.assert(!rvcpu.signatureNeeded());
         std.debug.print("No signature needed\n", .{});
     }
 }
@@ -187,7 +203,6 @@ fn printBinary(data: []const u8, offset: u64) void {
 }
 
 pub fn loadElf(path: []const u8) !void {
-    try libelf.init();
     const f = try std.fs.cwd().openFile(path, std.fs.File.OpenFlags { .mode = .read_only });
     var elf = try libelf.Elf(.w64).load(f);
     defer elf.deinit();

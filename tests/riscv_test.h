@@ -209,8 +209,6 @@ _start:                                                                 \
         li TESTNUM, 1;                                                  \
         li a7, 93;                                                      \
         li a0, 0;                                                       \
-        la a1, begin_signature;                                         \
-        la a2, end_signature;                                           \
         ecall
 
 #define TESTNUM gp
