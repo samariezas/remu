@@ -261,7 +261,9 @@ const JTypeInstruction = packed struct {
         const imm1: u21 = @intCast(self.imm1);
         const imm2: u21 = @intCast(self.imm2);
         const imm3: u21 = @intCast(self.imm3);
-        const imm4: u21 = @intCast(self.imm3);
+        // TODO: THIS WAS NOT CAUGHT BY THE TEST SUITE
+        // const imm4: u21 = @intCast(self.imm3);
+        const imm4: u21 = @intCast(self.imm4);
         const retval = (
             (imm1 << 12) |       
             (imm2 << 11) |
