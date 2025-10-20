@@ -9,7 +9,7 @@ let
     hash = "sha256-gcoHRFDznlISVJU/IveZc1m59HUytc39Pf+obIKY0hQ=";
   };
 
-  spike = pkgs.spike.overrideAttrs (old: {
+  spike-mod = pkgs.spike.overrideAttrs (old: {
     src = pkgs.fetchFromGitHub {
       owner = "riscv";
       repo = "riscv-isa-sim";
@@ -63,7 +63,7 @@ in rec {
     src = riscv-tests-orig;
 
     nativeBuildInputs = [
-      spike
+      spike-mod
       pkgs.dtc
     ];
 
@@ -90,6 +90,14 @@ in rec {
     paths = [
       riscv-tests-elf
       riscv-tests-signatures
+    ];
+  };
+
+  riscv-devshell = riscvPkgs.mkShell {
+    nativeBuildInputs = with pkgs; [
+      spike-mod
+      dtc
+      autoconf
     ];
   };
 }

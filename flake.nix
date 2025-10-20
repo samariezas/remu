@@ -13,15 +13,19 @@
     in {
       packages.${system} = with tests; {
         inherit riscv-tests
-                riscv-tests-orig;
+                riscv-tests-orig
+                riscv-tests-elf;
       };
 
-      devShells.${system}.default = pkgs.mkShell {
-        buildInputs = with pkgs; [
-          glibc
-          libelf
-          zig
-        ];
+      devShells.${system} = {
+        default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            glibc
+            libelf
+            zig
+          ];
+        };
+        riscv = tests.riscv-devshell;
       };
 
       apps.${system}.tests = {

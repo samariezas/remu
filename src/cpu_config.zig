@@ -15,17 +15,25 @@ pub const CpuOptions = struct {
 
     word_size: WordSize,
     m_extension: bool,
+    privileged: bool,
 
     pub fn makeBase(word_size: WordSize) CpuOptions {
         return .{
             .word_size = word_size,
             .m_extension = false,
+            .privileged = false,
         };
     }
 
     pub fn withM(self: Self) Self {
         var new = self;
         new.m_extension = true;
+        return new;
+    }
+
+    pub fn withPrivileged(self: Self) Self {
+        var new = self;
+        new.privileged = true;
         return new;
     }
 

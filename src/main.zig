@@ -33,7 +33,7 @@ pub fn runSingle(
     var elf_file = try libelf.Elf(opt.word_size).load(f);
 
     const signature_info = try elf_file.getSymbolsMultiple(
-        &[_][:0]const u8{"begin_signature", "end_signature"}
+        &[_][:0]const u8{"begin_signature", "end_signature", "tohost"}
     ) orelse @panic("Failed reading signature data");
 
     const cpu_type = cpu.RVCPU(opt);
@@ -47,6 +47,7 @@ pub fn runSingle(
         writer,
         signature_info.begin_signature.address,
         signature_info.end_signature.address,
+        signature_info.tohost.address,
     );
     defer rvcpu.deinit();
 
@@ -246,7 +247,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        try runSingle(base64.withM(), allocator, image, std.fs.cwd(), stdout_writer);
+        try runSingle(base64.withM().withPrivileged(), allocator, image, std.fs.cwd(), stdout_writer);
     } else if (std.mem.eql(u8, run_type, "multi")) {
         const start = args.next() orelse @panic("Missing start of name argument");
         const path = args.next() orelse @panic("Missing path argument");
