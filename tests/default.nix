@@ -9,6 +9,11 @@ let
     hash = "sha256-gcoHRFDznlISVJU/IveZc1m59HUytc39Pf+obIKY0hQ=";
   };
 
+  libprintf = import ./libprintf.nix {
+    stdenv = riscvPkgs.stdenv;
+    fetchFromGitHub = riscvPkgs.fetchFromGitHub;
+  };
+in rec {
   spike-mod = pkgs.spike.overrideAttrs (old: {
     src = pkgs.fetchFromGitHub {
       owner = "riscv";
@@ -26,11 +31,6 @@ let
     installCheckPhase = null;
   });
 
-  libprintf = import ./libprintf.nix {
-    stdenv = riscvPkgs.stdenv;
-    fetchFromGitHub = riscvPkgs.fetchFromGitHub;
-  };
-in rec {
   riscv-tests-orig = riscvPkgs.stdenv.mkDerivation {
     name = "riscv-tests-orig";
     src = riscvTestsSrc;
@@ -56,8 +56,8 @@ in rec {
     '';
   };
 
-  riscv-tests-elf = riscv-tests-orig.overrideAttrs (old: {
-    name = "riscv-tests-elf";
+  riscv-tests = riscv-tests-orig.overrideAttrs (old: {
+    name = "riscv-tests";
 
     patches = [ ./riscv_failing_test.patch ];
 
@@ -66,41 +66,6 @@ in rec {
       cp ${./riscv_test.h} ./env/p/riscv_test.h
     '';
   });
-
-  riscv-tests-signatures = pkgs.stdenv.mkDerivation {
-    name = "riscv-tests-signatures";
-    src = riscv-tests-orig;
-
-    nativeBuildInputs = [
-      spike-mod
-      pkgs.dtc
-    ];
-
-    buildPhase = ''
-      mkdir -p $out/share/riscv-tests/isa
-      FLIST=$(find ./share/riscv-tests/isa/ -type f | grep -v "\.dump$" | sed -e '/readme.txt$/d' -e '/Makefile$/d' -e '/\.gitignore$/d') 
-      for BIN in $FLIST
-      do
-        echo $BIN
-        if [[ $BIN =~ "rv32" ]]
-        then
-          echo "rv32"
-          spike --isa=rv32gc_ziccid_zfh_zicboz_svnapot_zicntr_zba_zbb_zbc_zbs --misaligned +signature=$out/$BIN.sig $BIN
-        else
-          echo "rv64"
-          spike --isa=rv64gch_ziccid_zfh_zicboz_svnapot_zicntr_zba_zbb_zbc_zbs --misaligned +signature=$out/$BIN.sig $BIN
-        fi
-      done
-    '';
-  };
-
-  riscv-tests = pkgs.buildEnv {
-    name = "riscv-tests";
-    paths = [
-      riscv-tests-elf
-      riscv-tests-signatures
-    ];
-  };
 
   riscv-devshell = riscvPkgs.mkShell {
     nativeBuildInputs = with pkgs; [

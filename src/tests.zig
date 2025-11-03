@@ -1,9 +1,24 @@
 const std = @import("std");
+const cpu = @import("cpu.zig");
+const libelf = @import("libelf.zig");
+const cpu_config = cpu.cpu_config;
 const fs = std.fs;
 const mem = std.mem;
+const posix = std.posix;
+const linux = std.os.linux;
 const ArrayList = std.ArrayList;
+const Allocator = mem.Allocator;
+const WordSize = cpu_config.WordSize;
+const CpuOptions = cpu_config.CpuOptions;
 
-const MAX_SIGNATURE_SIZE = 1024*1024*1024;
+fn writeNull(_: *const anyopaque, bytes: []const u8) anyerror!usize {
+    return bytes.len;
+}
+
+pub const null_writer = std.io.AnyWriter {
+    .context = undefined,
+    .writeFn = writeNull,
+};
 
 pub fn findAll(allocator: mem.Allocator, start: []const u8, path: fs.Dir) ![][]const u8 {
     var walker = try path.walk(allocator);
@@ -27,18 +42,10 @@ pub const Signature = struct {
     }
 };
 
-pub fn loadSignature(allocator: mem.Allocator, image_name: []const u8, path: fs.Dir) !?[]u8 {
-    const signature_name = try std.fmt.allocPrint(allocator, "{s}.sig", .{image_name});
-    defer allocator.free(signature_name);
-    path.access(signature_name, fs.File.OpenFlags { .mode = fs.File.OpenMode.read_only, }) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    const data = try path.readFileAlloc(allocator, signature_name, MAX_SIGNATURE_SIZE);
-    defer allocator.free(data);
+fn preprocessSignature(allocator: Allocator, raw_signature: []const u8) ![]u8 {
     var lines = ArrayList([]const u8).init(allocator);
     defer lines.deinit();
-    var it = std.mem.splitScalar(u8, data, '\n');
+    var it = std.mem.splitScalar(u8, raw_signature, '\n');
     while (it.next()) |line| {
         try lines.append(line);
     }
@@ -67,3 +74,404 @@ pub fn loadSignature(allocator: mem.Allocator, image_name: []const u8, path: fs.
     std.mem.reverse(u8, result.items);
     return try result.toOwnedSlice();
 }
+
+pub const ProcessRunResult = union(enum) {
+    Normal: u8,
+    Abnormal: void,
+};
+
+pub const SpikeRunResults = struct {
+    process_result: ProcessRunResult,
+    stdout: []u8,
+    stderr: []u8,
+    signature: []u8,
+
+    pub fn deinit(self: *const SpikeRunResults, allocator: Allocator) void {
+        allocator.free(self.stdout);
+        allocator.free(self.stderr);
+        allocator.free(self.signature);
+    }
+
+    pub fn isFailure(self: *const SpikeRunResults) bool {
+        if (self.stderr.len != 0) return true;
+        switch (self.process_result) {
+            .Abnormal => return true,
+            .Normal => |d| {
+                if (d != 0) return true;
+            }
+        }
+        return false;
+    }
+};
+
+fn registerFd(epoll_fd: i32, fd: i32, registered_fds: *usize) !void {
+    var ev: linux.epoll_event = undefined;
+    ev.events = linux.EPOLL.IN;
+    ev.data.fd = fd;
+    if (linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, fd, &ev) != 0) {
+        return error.EPOLLCTL;
+    }
+    registered_fds.* += 1;
+}
+
+// TODO: check for failed spawn
+pub fn runSpike(
+    allocator: Allocator,
+    word_size: WordSize,
+    image: []const u8
+) !SpikeRunResults {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const isa: [:0]const u8 = switch (word_size) {
+        .w32 => "--isa=rv32gc_ziccid_zfh_zicboz_svnapot_zicntr_zba_zbb_zbc_zbs",
+        .w64 => "--isa=rv64gch_ziccid_zfh_zicboz_svnapot_zicntr_zba_zbb_zbc_zbs",
+    };
+    const epoll_fd: posix.fd_t = @intCast(linux.epoll_create());
+    const stdout_read_fd, const stdout_write_fd = try posix.pipe();
+    const stderr_read_fd, const stderr_write_fd = try posix.pipe();
+    const signature_read_fd, const signature_write_fd = try posix.pipe();
+    defer {
+        posix.close(stdout_read_fd);
+        posix.close(stderr_read_fd);
+        posix.close(signature_read_fd);
+        posix.close(epoll_fd);
+    }
+    const signature = try std.fmt.allocPrintZ(
+        arena_allocator,
+        "+signature=/proc/self/fd/{}",
+        .{signature_write_fd}
+    );
+    const environment = try std.process.createEnvironFromExisting(
+        arena_allocator,
+        std.c.environ,
+        .{},
+    );
+    const child_arguments = [_:null]?[*:0]const u8 {
+        "spike",
+        isa,
+        "--misaligned",
+        signature,
+        try arena_allocator.dupeZ(u8, image),
+    };
+    const child_pid = try std.posix.fork();
+    if (child_pid == 0) {
+        posix.close(stdout_read_fd);
+        posix.close(stderr_read_fd);
+        posix.close(signature_read_fd);
+        try posix.dup2(stdout_write_fd, std.c.STDOUT_FILENO);
+        try posix.dup2(stderr_write_fd, std.c.STDERR_FILENO);
+        std.posix.execvpeZ("spike", &child_arguments, environment) catch unreachable;
+        @panic("exec failed");
+    }
+    posix.close(stdout_write_fd);
+    posix.close(stderr_write_fd);
+    posix.close(signature_write_fd);
+    var registered_fds: usize = 0;
+    var epoll_events: [3]linux.epoll_event = undefined;
+    try registerFd(epoll_fd, stdout_read_fd, &registered_fds);
+    try registerFd(epoll_fd, stderr_read_fd, &registered_fds);
+    try registerFd(epoll_fd, signature_read_fd, &registered_fds);
+    var collected_stdout = std.ArrayList(u8).init(arena_allocator);
+    var collected_stderr = std.ArrayList(u8).init(arena_allocator);
+    var collected_signature = std.ArrayList(u8).init(arena_allocator);
+    defer {
+        collected_stdout.deinit();
+        collected_stderr.deinit();
+        collected_signature.deinit();
+    }
+    while (registered_fds > 0) {
+        const nfds = linux.epoll_wait(epoll_fd, &epoll_events, epoll_events.len, -1);
+        if (nfds == std.math.maxInt(@TypeOf(nfds))) {
+            @panic("epoll error");
+        }
+        for (epoll_events[0..nfds]) |event| {
+            if ((event.events & linux.EPOLL.IN) != 0) {
+                var buffer: [4096]u8 = undefined;
+                const bytes_read = try posix.read(event.data.fd, &buffer);
+                if (event.data.fd == stdout_read_fd) {
+                    try collected_stdout.appendSlice(buffer[0..bytes_read]);
+                } else if (event.data.fd == stderr_read_fd) {
+                    try collected_stderr.appendSlice(buffer[0..bytes_read]);
+                } else if (event.data.fd == signature_read_fd) {
+                    try collected_signature.appendSlice(buffer[0..bytes_read]);
+                } else {
+                    @panic("Unknown file descriptor");
+                }
+            } else if ((event.events & linux.EPOLL.HUP) != 0) {
+                const errno = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_DEL, event.data.fd, null);
+                if (errno == std.math.maxInt(@TypeOf(errno))) {
+                    @panic("EPOLL_CTL_DEL failed");
+                }
+                registered_fds -= 1;
+            } else {
+                @panic("Unknown event");
+            }
+        }
+    }
+    const wait_result = posix.waitpid(child_pid, 0);
+    std.debug.assert(wait_result.pid == child_pid);
+    const process_result = if (posix.W.IFEXITED(wait_result.status))
+        ProcessRunResult{.Normal = posix.W.EXITSTATUS(wait_result.status)}
+    else
+        ProcessRunResult{.Abnormal = {}};
+    return .{
+        .process_result = process_result,
+        .stdout = try allocator.dupe(u8, collected_stdout.items),
+        .stderr = try allocator.dupe(u8, collected_stderr.items),
+        .signature = try preprocessSignature(allocator, collected_signature.items),
+    };
+}
+
+const RemuRunResult = struct {
+    failure_code: ?u64,
+    signature: []u8,
+
+    fn deinit(self: @This(), allocator: Allocator) void {
+        allocator.free(self.signature);
+    }
+};
+
+pub fn runRemu(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    image: []const u8,
+    debug_writer: std.io.AnyWriter,
+    serial_writer: std.io.AnyWriter,
+) !RemuRunResult {
+    const f = try std.fs.cwd().openFile(
+        image, .{ .mode = .read_only }
+    );
+    defer f.close();
+    var elf_file = try libelf.Elf(opt.word_size).load(f);
+    const signature_info = try elf_file.getSymbolsMultiple(
+        &[_][:0]const u8{"begin_signature", "end_signature", "tohost"}
+    ) orelse @panic("Failed reading signature data");
+    const cpu_type = cpu.RVCPU(opt);
+    const memory_start: cpu_type.Tword = 0x8000_0000;
+    const memory_size: cpu_type.Tword = 1024*1024;
+    var rvcpu = try cpu_type.init(
+        allocator,
+        elf_file.getEntrypoint(),
+        memory_start,
+        memory_size,
+        debug_writer,
+        signature_info.begin_signature.address,
+        signature_info.end_signature.address,
+        signature_info.tohost.address,
+        serial_writer,
+    );
+    defer rvcpu.deinit();
+    var it = try elf_file.get_loadable_it();
+    while (it.next()) |segment| {
+        try rvcpu.loadData(segment.start_address, segment.data);
+        const offset: cpu_type.Tword = @intCast(segment.data.len);
+        try rvcpu.loadZeroes(segment.start_address + offset, segment.padding);
+    }
+    while (!rvcpu.isHalted()) {
+        try rvcpu.tick();
+    }
+    const signature = try rvcpu.getSignature(allocator);
+    const failure_code = rvcpu.getTestFailureCode();
+    const failure_code_u64: ?u64 = if (failure_code) |code| @intCast(code) else null;
+    return .{
+        .failure_code = failure_code_u64,
+        .signature = signature,
+    };
+}
+
+const CollectedRemuRunResult = struct {
+    failure_code: ?u64,
+    signature: []u8,
+    serial_output: []u8,
+
+    pub fn deinit(self: @This(), allocator: Allocator) void {
+        allocator.free(self.signature);
+        allocator.free(self.serial_output);
+    }
+
+    fn isFailure(self: @This()) bool {
+        if (self.failure_code != null) return true;
+        return false;
+    }
+};
+
+pub fn runRemuAndCollectSerial(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    image: []const u8,
+    debug_writer: std.io.AnyWriter,
+) !CollectedRemuRunResult {
+    var serial_output = std.ArrayList(u8).init(allocator);
+    defer serial_output.deinit();
+    const serial_writer = serial_output.writer().any();
+    const remu_result = try runRemu(opt, allocator, image, debug_writer, serial_writer);
+    return .{
+        .failure_code = remu_result.failure_code,
+        .signature = remu_result.signature,
+        .serial_output = try serial_output.toOwnedSlice(),
+    };
+}
+
+fn stringCmp(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
+}
+
+const TestSuiteResult = struct {
+    total_tests: usize,
+    failed_tests: [][]const u8,
+};
+
+fn printResults(
+    results: []const TestSuiteResult,
+    writer: std.io.AnyWriter,
+) !void {
+    var failed_tests: usize = 0;
+    var total_tests: usize = 0;
+    for (results) |r| {
+        total_tests += r.total_tests;
+        failed_tests += r.failed_tests.len;
+    }
+    if (failed_tests != 0) {
+        try writer.print("------------------------------\nFailed tests:\n", .{});
+        for (results) |r| {
+            std.mem.sort([]const u8, r.failed_tests, {}, stringCmp);
+            for (r.failed_tests) |i| {
+                try writer.print("{s}\n", .{i});
+            }
+        }
+        try writer.print("------------------------------\n", .{});
+    }
+    try writer.print("Test summary: {}/{}\n", .{(total_tests - failed_tests), total_tests});
+
+    if (failed_tests != 0) {
+        return error.TestFailed;
+    }
+}
+
+const RunDiscrepancy = union(enum) {
+    NoDiscrepancy: struct {
+        signature: []u8,
+        serial_output: []u8,
+    },
+    Discrepancy: struct {
+        spike_results: SpikeRunResults,
+        remu_results: CollectedRemuRunResult,
+    },
+
+    fn init(allocator: Allocator, spike_results: SpikeRunResults, remu_results: CollectedRemuRunResult) RunDiscrepancy {
+        const signatures_match: bool = std.mem.eql(u8, spike_results.signature, remu_results.signature);
+        const serial_outputs_match: bool = std.mem.eql(u8, spike_results.stdout, remu_results.serial_output);
+        if (spike_results.isFailure() or remu_results.isFailure() or !signatures_match or !serial_outputs_match) {
+            return RunDiscrepancy {
+                .Discrepancy = .{
+                    .spike_results = spike_results,
+                    .remu_results = remu_results,
+                }
+            };
+        }
+        spike_results.deinit(allocator);
+        return RunDiscrepancy {
+            .NoDiscrepancy = .{
+                .signature = remu_results.signature,
+                .serial_output = remu_results.serial_output,
+            }
+        };
+    }
+
+    pub fn deinit(self: RunDiscrepancy, allocator: Allocator) void {
+        switch(self) {
+            .NoDiscrepancy => |d| {
+                allocator.free(d.signature);
+                allocator.free(d.serial_output);
+            },
+            .Discrepancy => |d| {
+                d.spike_results.deinit(allocator);
+                d.remu_results.deinit(allocator);
+            },
+        }
+    }
+};
+
+pub fn runSingle(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    image: []const u8,
+    debug_writer: std.io.AnyWriter,
+) !RunDiscrepancy {
+    const spike_result = try runSpike(allocator, opt.word_size, image);
+    const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer);
+    return RunDiscrepancy.init(allocator, spike_result, remu_result);
+}
+
+// TODO: reimplement
+// fn runMulti(
+//     comptime opt: CpuOptions,
+//     allocator: Allocator,
+//     result_allocator: Allocator,
+//     start: []const u8,
+//     path: []const u8,
+//     writer: std.io.AnyWriter
+// ) !TestSuiteResult {
+//     var arena = std.heap.ArenaAllocator.init(allocator);
+//     defer arena.deinit();
+//     const arena_allocator = arena.allocator();
+//
+//     const cwd = std.fs.cwd();
+//     const dest_dir = try cwd.openDir(path, .{ .iterate = true });
+//     const items = try tests.findAll(arena_allocator, start, dest_dir);
+//
+//     var total_tests: usize = 0;
+//     var passed_tests: usize = 0;
+//
+//     var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
+//     for (items) |i| {
+//         try writer.print("Running {s}\n", .{i});
+//         const pid = linux.fork();
+//         if (pid == 0) {
+//             const rl = linux.rlimit {
+//                 .cur = 1,
+//                 .max = 1,
+//             };
+//             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
+//
+//             try runSingle(opt, allocator, i, dest_dir, null_writer);
+//             std.process.exit(0);
+//         } else {
+//             var status: u32 = 0;
+//             std.debug.assert(linux.waitpid(@intCast(pid), &status, 0) == pid);
+//             const success = linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
+//             try writer.print("t={s}, success={}\n", .{i, success});
+//             if (success) {
+//                 passed_tests += 1;
+//             } else {
+//                 try failed_tests.append(i);
+//             }
+//         }
+//         total_tests += 1;
+//     }
+//     var result = TestSuiteResult {
+//         .total_tests = total_tests,
+//         .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
+//     };
+//     for (failed_tests.items, 0..) |t, i| {
+//         result.failed_tests[i] = try result_allocator.dupe(u8, t);
+//     }
+//     return result;
+// }
+//
+// pub fn runMultipleSuites(
+//     allocator: Allocator,
+//     result_allocator: Allocator,
+//     path: []const u8,
+//     writer: std.io.AnyWriter
+// ) !void {
+//     const results = [_]TestSuiteResult {
+//         try runMulti(base32, allocator, result_allocator, "rv32ui-p", path, writer),
+//         try runMulti(base64, allocator, result_allocator, "rv64ui-p", path, writer),
+//         try runMulti(base32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
+//         try runMulti(base64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
+//     };
+//     try printResults(&results, writer);
+// }

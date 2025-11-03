@@ -71,7 +71,10 @@ void c_entry(void) {
     //     tests[idx].fn();
     //     GENERIC_FAILURE(3);
     // }
+    test_results.test3_privilege_level = 1;
     int x = 0x1234;
-    printf_("Hello, World! Integer: %x\n", x);
+    for (int i = 0; i < 8; i++) {
+        printf_("Hello, World! Integer: %x\n", x);
+    }
     TEST_PASS();
 }

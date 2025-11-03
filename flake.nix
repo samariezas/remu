@@ -13,8 +13,7 @@
     in {
       packages.${system} = with tests; {
         inherit riscv-tests
-                riscv-tests-orig
-                riscv-tests-elf;
+                riscv-tests-orig;
       };
 
       devShells.${system} = {
@@ -23,6 +22,9 @@
             glibc
             libelf
             zig
+
+            tests.spike-mod
+            dtc
           ];
         };
         riscv = tests.riscv-devshell;
