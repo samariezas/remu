@@ -458,6 +458,48 @@ const TrapMode = enum {
     }
 };
 
+const PrivilegeLevel = enum {
+    User,
+    Supervisor,
+    Machine,
+
+    fn getEncoding(self: PrivilegeLevel) u2 {
+        switch (self) {
+            .User => return 0,
+            .Supervisor => return 1,
+            .Machine => return 3,
+        }
+    }
+
+    fn fromEncoding(encoding: u2) ?PrivilegeLevel {
+        switch (encoding) {
+            0 => return .User,
+            1 => return .Supervisor,
+            3 => return .Machine,
+            else => return null,
+        }
+    }
+};
+
+const SppPrivilegeLevel = enum {
+    User,
+    Supervisor,
+
+    fn getEncoding(self: SppPrivilegeLevel) u1 {
+        switch (self) {
+            .User => return 0,
+            .Supervisor => return 1,
+        }
+    }
+
+    fn fromEncoding(encoding: u1) SppPrivilegeLevel {
+        switch (encoding) {
+            0 => return .User,
+            1 => return .Supervisor,
+        }
+    }
+};
+
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
     return struct {
         const Self = @This();
@@ -476,9 +518,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         trap_handler_address: Tword,
         trap_mode: TrapMode,
-
         mepc: Tword,
         mcause: Tword,
+        current_privilege_level: PrivilegeLevel,
+        mpp: PrivilegeLevel,
+        spp: SppPrivilegeLevel,
+        mie: bool,
+        sie: bool,
+        mpie: bool,
+        spie: bool,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -666,15 +714,102 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         };
 
+        const MStatusCSR = packed struct {
+            wpri1: u1,
+            sie: u1,
+            wpri2: u1,
+            mie: u1,
+            wpri3: u1,
+            spie: u1,
+            ube: u1,
+            mpie: u1,
+            spp: u1,
+            vs: u2,
+            mpp: u2,
+            fs: u2,
+            xs: u2,
+            mprv: u1,
+            sum: u1,
+            mxr: u1,
+            tvm: u1,
+            tw: u1,
+            tsr: u1,
+            spelp: u1,
+            sdt: u1,
+            wpri4: u7,
+            uxl: u2,
+            sxl: u2,
+            sbe: u1,
+            mbe: u1,
+            gva: u1,
+            mpv: u1,
+            wpri5: u1,
+            mpelp: u1,
+            mdt: u1,
+            wpri6: u20,
+            sd: u1,
+
+            fn handleWrite(cpu: *Self, value: Tword) void {
+                _ = cpu;
+                _ = value;
+            }
+
+            fn handleRead(cpu: *Self) Tword {
+                comptime if (@bitSizeOf(MStatusCSR) != @bitSizeOf(Tword)) {
+                    @compileError("MStatusCSR mismatch");
+                };
+                const retval = MStatusCSR {
+                    .wpri1 = 0,
+                    .wpri2 = 0,
+                    .wpri3 = 0,
+                    .wpri4 = 0,
+                    .wpri5 = 0,
+                    .wpri6 = 0,
+
+                    .sie = @intFromBool(cpu.sie),
+                    .mie = @intFromBool(cpu.mie),
+                    .spie = @intFromBool(cpu.spie),
+                    .ube = 0, // u-mode memory fetch endianness
+                    .mpie = @intFromBool(cpu.mpie),
+                    .spp = cpu.spp.getEncoding(),
+                    .vs = 0,
+                    .mpp = cpu.mpp.getEncoding(),
+                    .fs = 0,
+                    .xs = 0,
+                    .mprv = 0, // TODO: implement!
+                    .sum = 0, // TODO: implement!
+                    .mxr = 0, // TODO: implement!
+                    .tvm = 0, // TODO: implement! satp CSR
+                    .tw = 0, // TODO: implement! WFI
+                    .tsr = 0, // TODO: implement, SRET for S-mode
+                    .spelp = 0, // TODO: wtf is this?
+                    .sdt = 0, // TODO: double trap
+                    .uxl = 2,   // 64bit in u-mode
+                    .sxl = 2,   // 64bit in s-mode
+                    .sbe = 0, // s-mode memory fetch endianness
+                    .mbe = 0, // s-mode memory fetch endianness
+                    .gva = 0, // TODO: implement! paging traps
+                    .mpv = 0,
+                    .mpelp = 0, // something with ELP?
+                    .mdt = 0, // TODO: implement? double traps
+                    .sd = 0, // fs, vs and xs
+                };
+                const retval_word: Tword = @bitCast(retval);
+                cpu.writer.print("Writing mstatus: {x:0>16}\n", .{retval_word}) catch unreachable;
+                return retval_word;
+            }
+        };
+
         fn handleWriteMepc(cpu: *Self, value: Tword) void { cpu.mepc = value; }
         fn handleReadMepc(cpu: *Self) Tword { std.debug.print("Reading MEPC: {x:0>8}\n", .{cpu.mepc}); return cpu.mepc; }
         fn handleWriteMcause(cpu: *Self, value: Tword) void { cpu.mcause = value; }
         fn handleReadMcause(cpu: *Self) Tword { return cpu.mcause; }
 
         const csr_map = [_]CsrMapEntry{
-            CsrMapEntry.new("mtvec",  0x305, MTVecCSR.handleWrite,  MTVecCSR.handleRead),
-            CsrMapEntry.new("mepc",   0x341, handleWriteMepc,       handleReadMepc),
-            CsrMapEntry.new("mcause", 0x342, handleWriteMcause,     handleReadMcause),
+            CsrMapEntry.new("mtvec",   0x305, MTVecCSR.handleWrite,  MTVecCSR.handleRead),
+            CsrMapEntry.new("mepc",    0x341, handleWriteMepc,       handleReadMepc),
+            CsrMapEntry.new("mcause",  0x342, handleWriteMcause,     handleReadMcause),
+            CsrMapEntry.new("mstatus", 0x300, MStatusCSR.handleWrite,MStatusCSR.handleRead),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -787,6 +922,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .trap_mode = .Direct,
                 .mepc = 0,
                 .mcause = 0,
+                .current_privilege_level = .Machine,
+                .mpp = .Machine,
+                .spp = .User,
+                .mie = false,
+                .sie = false,
+                .mpie = false,
+                .spie = false,
             };
         }
 
@@ -1281,10 +1423,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         // TODO: split out properly
         fn handleEcall(self: *Self, instruction: u32) void {
             if (instruction == 0x00000073) { // ECALL
-                std.debug.assert(!self.isHalted());
-                self.test_result = TestResult(Tword) {
-                    .a0 = self.getRegister(10),
-                };
+                // std.debug.assert(!self.isHalted());
+                // self.test_result = TestResult(Tword) {
+                //     .a0 = self.getRegister(10),
+                // };
+                switch (self.current_privilege_level) {
+                    .User => self.trap(8),
+                    .Supervisor => self.trap(10),
+                    .Machine => self.trap(11),
+                }
             } else if (instruction == 0x30200073) { // MRET
                 self.pc = self.mepc;
             } else {

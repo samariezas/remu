@@ -47,7 +47,7 @@ pub fn main() !u8 {
     if (std.mem.eql(u8, run_type, "remu")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        const result = try tests.runRemuAndCollectSerial(base64, allocator, image, stdout_writer);
+        const result = try tests.runRemuAndCollectSerial(priv64, allocator, image, stdout_writer);
         defer result.deinit(allocator);
         try stdout_writer.print("Signature: {s}\n", .{result.signature});
         try stdout_writer.print("Serial output:\n--------\n{s}--------\n",
@@ -60,7 +60,7 @@ pub fn main() !u8 {
     } else if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        const result = try tests.runSingle(base64, allocator, image, tests.null_writer);
+        const result = try tests.runSingle(priv64, allocator, image, tests.null_writer);
         defer result.deinit(allocator);
         switch (result) {
             .Discrepancy => |d| {
