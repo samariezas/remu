@@ -142,9 +142,7 @@ fn Bus(comptime Tword: type) type {
 
         // TODO: do in a better way (i.e. allow reading from multiple devices for a single read)
         fn findDevice(self: *Self, address: Tword) ?*BusDevice(Tword) {
-            // std.debug.print("Searching for device: @{X:0>8}\n", .{address});
             for (self.devices) |*dev| {
-                // std.debug.print("{X:0>8} {X:0>8}\n", .{dev.start_address, dev.start_address + slice_len});
                 if (address >= dev.start_address and address < dev.start_address + dev.length) {
                     return dev;
                 }
@@ -804,7 +802,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         };
 
         fn handleWriteMepc(cpu: *Self, value: Tword) void { cpu.mepc = value; }
-        fn handleReadMepc(cpu: *Self) Tword { std.debug.print("Reading MEPC: {x:0>8}\n", .{cpu.mepc}); return cpu.mepc; }
+        fn handleReadMepc(cpu: *Self) Tword { return cpu.mepc; }
         fn handleWriteMcause(cpu: *Self, value: Tword) void { cpu.mcause = value; }
         fn handleReadMcause(cpu: *Self) Tword { return cpu.mcause; }
 
