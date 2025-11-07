@@ -39,6 +39,7 @@ pub fn runSingle(
     const cpu_type = cpu.RVCPU(opt);
     const memory_start: cpu_type.Tword = 0x8000_0000;
     const memory_size: cpu_type.Tword = 1024*1024;
+    const serial_writer = std.io.getStdOut().writer().any();
     var rvcpu = try cpu_type.init(
         allocator,
         elf_file.getEntrypoint(),
@@ -48,6 +49,7 @@ pub fn runSingle(
         signature_info.begin_signature.address,
         signature_info.end_signature.address,
         signature_info.tohost.address,
+        serial_writer,
     );
     defer rvcpu.deinit();
 
@@ -235,7 +237,6 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
-
     var args = std.process.args();
     std.debug.assert(args.skip());
     const run_type = args.next() orelse @panic("Missing run type argument");
@@ -247,7 +248,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        try runSingle(base64.withM().withPrivileged(), allocator, image, std.fs.cwd(), stdout_writer);
+        try runSingle(base64.withM().withPrivileged(), allocator, image, std.fs.cwd(), null_writer);
     } else if (std.mem.eql(u8, run_type, "multi")) {
         const start = args.next() orelse @panic("Missing start of name argument");
         const path = args.next() orelse @panic("Missing path argument");

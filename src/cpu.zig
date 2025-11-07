@@ -24,24 +24,108 @@ fn signExtend(comptime T: type, val: anytype) T {
     return @bitCast(signed_extended);                  //return u32
 }
 
-fn Bus(comptime Tword: type) type {
+fn BusDevice(comptime Tword: type) type {
     return struct {
-        memory_start: Tword,
-        memory: []u8,
+        start_address: Tword,
+        length: Tword,
+        vtag: union(enum) {
+            memory: struct {
+                allocator: Allocator,
+                data: []u8,
+            },
+            serial: struct {
+                writer: std.io.AnyWriter,
+            },
+        },
 
         const Self = @This();
 
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword) !Self {
+        fn initMemory(allocator: Allocator, memory_start: Tword, memory_length: Tword) !Self {
             const memory = try allocator.alloc(u8, memory_length);
-            @memset(memory, 0xa1);
+            @memset(memory, 0xa1); // TODO: hide under some "debug" flag
             return .{
-                .memory_start = memory_start,
-                .memory = memory,
+                .start_address = memory_start,
+                .length = memory_length,
+                .vtag = .{ .memory = .{
+                    .allocator = allocator,
+                    .data = memory,
+                }},
+            };
+        }
+
+        fn initSerial(writer: std.io.AnyWriter) Self {
+            const retval = Self {
+                .start_address = 0x10000000,
+                .length = 0x1000,
+                .vtag = .{ .serial = .{
+                    .writer = writer,
+                }},
+            };
+            return retval;
+        }
+        
+        fn deinit(self: *Self) void {
+            switch (self.vtag) {
+                .memory => |*m| { m.*.allocator.free(m.*.data); },
+                .serial => { },
+            }
+        }
+
+        fn readMemory(self: *Self, offset: Tword, dest: []u8) !void {
+            const length: Tword = @intCast(dest.len);
+            if (offset + length >= self.length) {
+                return error.OutOfBounds;
+            }
+            switch (self.vtag) {
+                .memory => |*m| {
+                    const s_offset: usize = @intCast(offset);
+                    @memcpy(dest, m.data[s_offset..(s_offset+dest.len)]);
+                },
+                .serial => return error.CannotReadSerialBlock,
+            }
+        }
+
+        fn writeMemory(self: *Self, offset: Tword, src: []const u8) !void {
+            const length: Tword = @intCast(src.len);
+            if (offset + length >= self.length) {
+                return error.OutOfBounds;
+            }
+            switch (self.vtag) {
+                .memory => |*m| {
+                    const s_offset: usize = @intCast(offset);
+                    @memcpy(m.data[s_offset..(s_offset+src.len)], src);
+                },
+                .serial => |*s| {
+                    if (offset == 0) {
+                        const written = s.writer.write(&[_]u8{src[0]}) catch unreachable;
+                        std.debug.assert(written == 1);
+                    }
+                },
+            }
+        }
+    };
+}
+
+fn Bus(comptime Tword: type) type {
+    return struct {
+        devices: []BusDevice(Tword),
+
+        const Self = @This();
+
+        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, serial_writer: std.io.AnyWriter) !Self {
+            var devices = try allocator.alloc(BusDevice(Tword), 2);
+            devices[0] = try BusDevice(Tword).initMemory(allocator, memory_start, memory_length);
+            devices[1] = BusDevice(Tword).initSerial(serial_writer);
+            return .{
+                .devices = devices,
             };
         }
 
         fn deinit(self: *Self, allocator: Allocator) void {
-            allocator.free(self.memory);
+            for (self.devices) |*dev| {
+                dev.deinit();
+            }
+            allocator.free(self.devices);
         }
 
         fn getMemorySlice(self: *Self, address: Tword, length: Tword) ![]u8 {
@@ -56,9 +140,24 @@ fn Bus(comptime Tword: type) type {
             return self.memory[start..end];
         }
 
+        // TODO: do in a better way (i.e. allow reading from multiple devices for a single read)
+        fn findDevice(self: *Self, address: Tword) ?*BusDevice(Tword) {
+            // std.debug.print("Searching for device: @{X:0>8}\n", .{address});
+            for (self.devices) |*dev| {
+                // std.debug.print("{X:0>8} {X:0>8}\n", .{dev.start_address, dev.start_address + slice_len});
+                if (address >= dev.start_address and address < dev.start_address + dev.length) {
+                    return dev;
+                }
+            }
+            return null;
+        }
+
         fn readMemory(self: *Self, address: Tword, dest: []u8) !void {
-            const length: Tword = @intCast(dest.len);
-            @memcpy(dest, try self.getMemorySlice(address, length));
+            if (self.findDevice(address)) |dev| {
+                try dev.readMemory(address - dev.start_address, dest);
+            } else {
+                return error.BusDeviceNotFound;
+            }
         }
 
         fn readWord(self: *Self, address: Tword) !Tword {
@@ -68,8 +167,12 @@ fn Bus(comptime Tword: type) type {
         }
 
         fn writeMemory(self: *Self, address: Tword, src: []const u8) !void {
-            const length: Tword = @intCast(src.len);
-            @memcpy(try self.getMemorySlice(address, length), src);
+            // TODO: do in a better way
+            if (self.findDevice(address)) |dev| {
+                try dev.writeMemory(address - dev.start_address, src);
+            } else {
+                return error.BusDeviceNotFound;
+            }
         }
 
         fn writeWord(self: *Self, address: Tword, word: Tword) !void {
@@ -656,7 +759,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 const slice = buffer[0..count];
                 @memset(slice, 0);
                 try self.bus.writeMemory(start, slice);
-                std.debug.print("Padding @{X:0>8} {} bytes\n", .{start, count});
             }
         }
 
@@ -669,12 +771,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             signature_start: Tword,
             signature_end: Tword,
             tohost_address: Tword,
+            serial_writer: std.io.AnyWriter,
         ) !RVCPU(opt) {
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
                 .pc = entrypoint,
-                .bus = try Bus(Tword).init(allocator, memory_start, memory_length),
+                .bus = try Bus(Tword).init(allocator, memory_start, memory_length, serial_writer),
                 .test_result = null,
                 .writer = writer,
                 .signature_start = signature_start,

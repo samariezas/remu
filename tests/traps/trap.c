@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <printf.h>
 
 static volatile int idx = 0;
 // static volatile int last_test_id = -1;
@@ -60,14 +61,17 @@ void c_trap_handler(void) {
     idx++;
 }
 
+void putchar_(char c) {
+    static char *UART_DEVICE = (char*)0x10000000;
+    *UART_DEVICE = c;
+}
+
 void c_entry(void) {
-    // TODO: last_test_id
-    // if (idx != last_test_id) {
-    //     TEST_FAILED(-1);
+    // if (idx < ELEM(tests)) {
+    //     tests[idx].fn();
+    //     GENERIC_FAILURE(3);
     // }
-    if (idx < ELEM(tests)) {
-        tests[idx]();
-        TEST_FAILED(-3);
-    }
+    int x = 0x1234;
+    printf_("Hello, World! Integer: %x\n", x);
     TEST_PASS();
 }
