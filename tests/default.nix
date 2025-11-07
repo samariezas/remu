@@ -17,6 +17,10 @@ let
       sha256 = "sha256-A37a3e+YNHFpu3xWtidF14yvBLNM764o7tH1BdCesOY=";
     };
 
+    patches = [
+        ./spike_getpriv.patch
+    ];
+
     doCheck = false;
     doInstallCheck = false;
     installCheckPhase = null;
