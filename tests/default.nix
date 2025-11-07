@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs }:
 let
   riscvPkgs = pkgs.pkgsCross.riscv64-embedded;
   riscvTestsSrc = pkgs.fetchFromGitHub {
@@ -21,6 +21,11 @@ let
     doInstallCheck = false;
     installCheckPhase = null;
   });
+
+  libprintf = import ./libprintf.nix {
+    stdenv = riscvPkgs.stdenv;
+    fetchFromGitHub = riscvPkgs.fetchFromGitHub;
+  };
 in rec {
   riscv-tests-orig = riscvPkgs.stdenv.mkDerivation {
     name = "riscv-tests-orig";
@@ -99,5 +104,7 @@ in rec {
       dtc
       autoconf
     ];
+
+    buildInputs = [ libprintf ];
   };
 }
