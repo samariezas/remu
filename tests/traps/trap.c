@@ -95,6 +95,8 @@ static volatile __attribute__((section(".data.signature"))) struct {
 //     test_results.privilege_levels[test_results.privilege_written++] = priv;
 // }
 
+#define GETPRIV_ENABLED
+
 static inline uint8_t get_priv(void) {
 #ifdef GETPRIV_ENABLED
     uint64_t retval;
@@ -149,8 +151,6 @@ void c_entry(void) {
     // }
     test_results.test3_privilege_level = 1;
     int x = 0x1234;
-    for (int i = 0; i < 8; i++) {
-        printf_("Hello, World! Integer: %x\n", x);
-    }
+    printf_("Privilege level: %u\n", get_priv());
     TEST_PASS();
 }

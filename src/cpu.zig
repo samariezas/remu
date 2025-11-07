@@ -663,6 +663,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 		Instr.makeF3("CSRRWI", 0b1110011, 5, handleCsrrwi, null),
 		Instr.makeF3("CSRRSI", 0b1110011, 6, handleCsrrsi, null),
 		Instr.makeF3("CSRRCI", 0b1110011, 7, handleCsrrci, null),
+
+                // TODO: hide under some "debug" flag
+                Instr.makeF37("GETPRIV", 0b0001011, 0, 0x78, handleGetpriv, null),
             } else [_]Instr {});
 
         const Tcsrid: type = u12;
@@ -1660,6 +1663,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.setRegister(parsed.rd, old_csr);
             const new_csr = old_csr & (~mask);
             std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+        }
+
+        fn handleGetpriv(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            self.setRegister(parsed.rd, @intCast(self.current_privilege_level.getEncoding()));
         }
 
         fn handleNop(_: *Self, _: u32) void { }
