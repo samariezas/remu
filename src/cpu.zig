@@ -260,9 +260,9 @@ fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
             };
         }
 
-        fn makeDirect(name: []const u8, opcode: u8, instruction: u32, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
+        fn makeDirect(name: []const u8, instruction: u32, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
             return .{
-                .opcode = opcode,
+                .opcode = instruction & 0x7f,
                 .id = InstructionID { .direct_match = instruction },
                 .handler = handler,
                 .name = name,
@@ -508,6 +508,13 @@ const SppPrivilegeLevel = enum {
             1 => return .Supervisor,
         }
     }
+
+    fn toRegular(self: SppPrivilegeLevel) PrivilegeLevel {
+        return switch (self) {
+            .User => PrivilegeLevel.User,
+            .Supervisor => PrivilegeLevel.Supervisor,
+        };
+    }
 };
 
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
@@ -539,6 +546,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         sie: bool,
         mpie: bool,
         spie: bool,
+        
+        medeleg: Tword,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -622,7 +631,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UWriter),
 
             // Misc
-            Instr.makeDirect("ECALL",0b1110011, 0x73, handleEcall, null).noJump(),
+            Instr.makeDirect("ECALL", 0x73, handleEcall, null).noJump(),
             Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
             Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
         } ++ 
@@ -680,7 +689,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 // TODO: hide under some "debug" flag
                 Instr.makeF37("GETPRIV", 0b0001011, 0, 0x78, handleGetpriv, null),
 
-		Instr.makeDirect("MRET", 0b1110011, 0x30200073, handleMret, null).noJump(),
+		Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
+		Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
             } else [_]Instr {});
 
         const Tcsrid: type = u12;
@@ -814,7 +824,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .mdt = 0, // TODO: implement? double traps
                     .sd = 0, // fs, vs and xs
                 };
+                // std.debug.print("Reading mstatus: {any}\n", .{retval});
                 const retval_word: Tword = @bitCast(retval);
+                // std.debug.print("Mstatus word: {x:0>16}\n", .{retval_word});
                 cpu.writer.print("Writing mstatus: {x:0>16}\n", .{retval_word}) catch unreachable;
                 return retval_word;
             }
@@ -892,6 +904,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteScause(cpu: *Self, value: Tword) void { cpu.scause = value; }
         fn handleReadScause(cpu: *Self) Tword { return cpu.scause; }
 
+        fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value; }
+        fn handleReadMedeleg(cpu: *Self) Tword { return cpu.medeleg; }
+
         const csr_map = [_]CsrMapEntry{
             CsrMapEntry.new("mtvec",   0x305, MTVecCSR.handleWrite,   MTVecCSR.handleRead),
             CsrMapEntry.new("mepc",    0x341, handleWriteMepc,        handleReadMepc),
@@ -901,6 +916,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("sepc",    0x141, handleWriteSepc,        handleReadSepc),
             CsrMapEntry.new("scause",  0x142, handleWriteScause,      handleReadScause),
             CsrMapEntry.new("sstatus", 0x100, SStatusCSR.handleWrite, SStatusCSR.handleRead),
+
+            CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,     handleReadMedeleg),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -967,10 +984,38 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.trap(0x2);
         }
 
-        fn trap(self: *Self, cause: Tword) void {
+        fn trap_to_mmode(self: *Self, cause: Tword) void {
             self.mepc = self.pc;
             self.mcause = cause;
             self.pc = self.trap_handler_address;
+            self.mpie = self.mie;
+            self.mie = false;
+            self.mpp = self.current_privilege_level;
+            self.current_privilege_level = .Machine;
+        }
+
+        fn trap_to_smode(self: *Self, cause: Tword) void {
+            self.sepc = self.pc;
+            self.scause = cause;
+            self.pc = self.trap_handler_address;
+            self.spie = self.sie;
+            self.sie = false;
+            self.spp = switch (self.current_privilege_level) {
+                .Machine => unreachable,
+                .User => SppPrivilegeLevel.User,
+                .Supervisor => SppPrivilegeLevel.Supervisor,
+            };
+            self.current_privilege_level = .Supervisor;
+        }
+
+        fn trap(self: *Self, cause: Tword) void {
+            const cause_small: u5 = @intCast(cause);
+            const do_delegation: bool = (self.medeleg >> cause_small) & 1 == 1;
+            if (self.current_privilege_level != .Machine and do_delegation) {
+                self.trap_to_smode(cause);
+            } else {
+                self.trap_to_mmode(cause);
+            }
         }
 
         fn getNextInstruction(self: *Self) !u32 {
@@ -1020,12 +1065,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .sepc = 0,
                 .scause = 0,
                 .current_privilege_level = .Machine,
-                .mpp = .Machine,
+                .mpp = .User,
                 .spp = .User,
                 .mie = false,
                 .sie = false,
                 .mpie = false,
                 .spie = false,
+                .medeleg = 0,
             };
         }
 
@@ -1771,7 +1817,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleMret(self: *Self, _: u32) void {
-            std.debug.print("Handling MRET {}\n", .{self.mie});
             self.mie = self.mpie;
             self.pc = self.mepc;
             // TODO: what is mprv?
@@ -1780,6 +1825,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             // }
             self.current_privilege_level = self.mpp;
             self.mpie = true;
+            self.mpp = .User;
+        }
+
+        fn handleSret(self: *Self, _: u32) void {
+            self.sie = self.spie;
+            self.pc = self.sepc;
+            // TODO: is there sprv, like mprv?
+            self.current_privilege_level = self.spp.toRegular();
+            self.spie = true;
             self.mpp = .User;
         }
 

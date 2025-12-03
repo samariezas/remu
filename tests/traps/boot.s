@@ -7,6 +7,7 @@ _start:
     la t0, _trap_handler
     csrw mtvec, t0
     la sp, _stack_start
+    call c_start
     j c_entry
 
 .section .text

@@ -76,17 +76,12 @@ static uint64_t get_csr_no_privcheck(uint32_t csr) {
     return retval;
 }
 
-static uint64_t get_mcause_noprivcheck(void) {
-    return get_csr_no_privcheck(0x342);
-}
-
-static uint64_t get_mstatus_noprivcheck(void) {
-    return get_csr_no_privcheck(0x300);
-}
-
-static uint64_t get_mepc_noprivcheck(void) {
-    return get_csr_no_privcheck(0x341);
-}
+static uint64_t get_mcause_noprivcheck(void) { return get_csr_no_privcheck(0x342); }
+static uint64_t get_mstatus_noprivcheck(void) { return get_csr_no_privcheck(0x300); }
+static uint64_t get_mepc_noprivcheck(void) { return get_csr_no_privcheck(0x341); }
+static uint64_t get_scause_noprivcheck(void) { return get_csr_no_privcheck(0x142); }
+static uint64_t get_sstatus_noprivcheck(void) { return get_csr_no_privcheck(0x100); }
+static uint64_t get_sepc_noprivcheck(void) { return get_csr_no_privcheck(0x141); }
 
 /* Steps */
 
@@ -175,6 +170,21 @@ SIGNATURE static volatile struct {
     //empty for now
 } test_results;
 
+void dump_csrs(void) {
+    printf_(
+        "mcause=%lx, mepc=%lx, mstatus=%lx\n",
+        get_mcause_noprivcheck(),
+        get_mepc_noprivcheck(),
+        get_mstatus_noprivcheck()
+    );
+    printf_(
+        "scause=%lx, sepc=%lx, sstatus=%lx\n",
+        get_scause_noprivcheck(),
+        get_sepc_noprivcheck(),
+        get_sstatus_noprivcheck()
+    );
+}
+
 static volatile bool should_trap = false;
 void c_trap_handler(void) {
     ASSERT(should_trap);
@@ -187,12 +197,7 @@ void c_trap_handler(void) {
 
     priv_level_t current_privilege = get_priv();
     printf_("TRAP step %i, priv=%s\n", step_idx, priv_level_to_str(current_privilege));
-    printf_(
-        "mcause=%lx, mepc=%lx, mstatus=%lx\n",
-        get_mcause_noprivcheck(),
-        get_mepc_noprivcheck(),
-        get_mstatus_noprivcheck()
-    );
+    dump_csrs();
     step_idx++;
     currently_handling = false;
 }
@@ -202,11 +207,17 @@ void putchar_(char c) {
     *UART_DEVICE = c;
 }
 
+void c_start(void) {
+    printf_("Core booting, register dump:\n");
+    dump_csrs();
+}
+
 void c_entry(void) {
     static int previous_idx = -1;
+    printf_("Entrypoint reached, priv=%s\n", priv_level_to_str(get_priv()));
     while (step_idx < ELEM(steps)) {
-        printf_("Executing step %i at priv level %s\n",
-                step_idx, priv_level_to_str(get_priv()));
+        printf_("Executing step %i\n", step_idx);
+        dump_csrs();
         if (previous_idx == step_idx) {
             printf_("Failed test, executing same step again\n");
             TEST_FAILED();
