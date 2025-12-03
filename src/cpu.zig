@@ -186,6 +186,7 @@ const InstructionID = union(enum) {
     funct_3: struct { funct3: u3 },
     funct_3_7: struct { funct3: u3, funct7: u7 },
     funct_3_6: struct { funct3: u3, funct6: u6 },
+    direct_match: u32,
 };
 
 fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
@@ -252,6 +253,17 @@ fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
             return .{
                 .opcode = opcode,
                 .id = InstructionID { .funct_3_6 = .{ .funct3 = funct3, .funct6 = funct6 } },
+                .handler = handler,
+                .name = name,
+                .advance_pc = true,
+                .writer_fn = writer_fn,
+            };
+        }
+
+        fn makeDirect(name: []const u8, opcode: u8, instruction: u32, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID { .direct_match = instruction },
                 .handler = handler,
                 .name = name,
                 .advance_pc = true,
@@ -518,6 +530,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         trap_mode: TrapMode,
         mepc: Tword,
         mcause: Tword,
+        sepc: Tword,
+        scause: Tword,
         current_privilege_level: PrivilegeLevel,
         mpp: PrivilegeLevel,
         spp: SppPrivilegeLevel,
@@ -608,7 +622,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UWriter),
 
             // Misc
-            Instr.makeF3("ECALL",   0b1110011, 0, handleEcall, null).noJump(),
+            Instr.makeDirect("ECALL",0b1110011, 0x73, handleEcall, null).noJump(),
             Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
             Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
         } ++ 
@@ -664,6 +678,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
                 // TODO: hide under some "debug" flag
                 Instr.makeF37("GETPRIV", 0b0001011, 0, 0x78, handleGetpriv, null),
+
+		Instr.makeDirect("MRET", 0b1110011, 0x30200073, handleMret, null).noJump(),
             } else [_]Instr {});
 
         const Tcsrid: type = u12;
@@ -751,8 +767,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             sd: u1,
 
             fn handleWrite(cpu: *Self, value: Tword) void {
-                _ = cpu;
-                _ = value;
+                const new_mstatus: MStatusCSR = @bitCast(value);
+                if (PrivilegeLevel.fromEncoding(new_mstatus.mpp)) |new_mpp| {
+                    cpu.mpp = new_mpp;
+                }
             }
 
             fn handleRead(cpu: *Self) Tword {
@@ -801,16 +819,87 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         };
 
+        const SStatusCSR = packed struct {
+            wpri1: u1,
+            sie: u1,
+            wpri2: u3,
+            spie: u1,
+            ube: u1,
+            wpri3: u1,
+            spp: u1,
+            vs: u2,
+            wpri4: u2,
+            fs: u2,
+            xs: u2,
+            mprv: u1,
+            sum: u1,
+            mxr: u1,
+            wpri5: u3,
+            spelp: u1,
+            sdt: u1,
+            wpri6: u7,
+            uxl: u2,
+            wpri7: u29,
+            sd: u1,
+
+            fn handleWrite(cpu: *Self, value: Tword) void {
+                const new_sstatus: SStatusCSR = @bitCast(value);
+                cpu.spp = SppPrivilegeLevel.fromEncoding(new_sstatus.spp);
+            }
+
+            fn handleRead(cpu: *Self) Tword {
+                comptime if (@bitSizeOf(SStatusCSR) != @bitSizeOf(Tword)) {
+                    @compileError("SStatusCSR mismatch");
+                };
+                const retval = SStatusCSR {
+                    .wpri1 = 0,
+                    .wpri2 = 0,
+                    .wpri3 = 0,
+                    .wpri4 = 0,
+                    .wpri5 = 0,
+                    .wpri6 = 0,
+                    .wpri7 = 0,
+
+                    .sie = @intFromBool(cpu.sie),
+                    .spie = @intFromBool(cpu.spie),
+                    .ube = 0, // u-mode memory fetch endianness
+                    .spp = cpu.spp.getEncoding(),
+                    .vs = 0,
+                    .fs = 0,
+                    .xs = 0,
+                    .mprv = 0, // TODO: implement!
+                    .sum = 0, // TODO: implement!
+                    .mxr = 0, // TODO: implement!
+                    .spelp = 0, // TODO: wtf is this?
+                    .sdt = 0, // TODO: double trap
+                    .uxl = 2,   // 64bit in u-mode
+                    .sd = 0, // fs, vs and xs
+                };
+                const retval_word: Tword = @bitCast(retval);
+                cpu.writer.print("Writing sstatus: {x:0>16}\n", .{retval_word}) catch unreachable;
+                return retval_word;
+            }
+        };
+
         fn handleWriteMepc(cpu: *Self, value: Tword) void { cpu.mepc = value; }
         fn handleReadMepc(cpu: *Self) Tword { return cpu.mepc; }
         fn handleWriteMcause(cpu: *Self, value: Tword) void { cpu.mcause = value; }
         fn handleReadMcause(cpu: *Self) Tword { return cpu.mcause; }
 
+        fn handleWriteSepc(cpu: *Self, value: Tword) void { cpu.sepc = value; }
+        fn handleReadSepc(cpu: *Self) Tword { return cpu.sepc; }
+        fn handleWriteScause(cpu: *Self, value: Tword) void { cpu.scause = value; }
+        fn handleReadScause(cpu: *Self) Tword { return cpu.scause; }
+
         const csr_map = [_]CsrMapEntry{
-            CsrMapEntry.new("mtvec",   0x305, MTVecCSR.handleWrite,  MTVecCSR.handleRead),
-            CsrMapEntry.new("mepc",    0x341, handleWriteMepc,       handleReadMepc),
-            CsrMapEntry.new("mcause",  0x342, handleWriteMcause,     handleReadMcause),
-            CsrMapEntry.new("mstatus", 0x300, MStatusCSR.handleWrite,MStatusCSR.handleRead),
+            CsrMapEntry.new("mtvec",   0x305, MTVecCSR.handleWrite,   MTVecCSR.handleRead),
+            CsrMapEntry.new("mepc",    0x341, handleWriteMepc,        handleReadMepc),
+            CsrMapEntry.new("mcause",  0x342, handleWriteMcause,      handleReadMcause),
+            CsrMapEntry.new("mstatus", 0x300, MStatusCSR.handleWrite, MStatusCSR.handleRead),
+
+            CsrMapEntry.new("sepc",    0x141, handleWriteSepc,        handleReadSepc),
+            CsrMapEntry.new("scause",  0x142, handleWriteScause,      handleReadScause),
+            CsrMapEntry.new("sstatus", 0x100, SStatusCSR.handleWrite, SStatusCSR.handleRead),
         };
 
         fn getRegister(self: *Self, id: usize) Tword {
@@ -832,6 +921,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .funct_3 => |*v| return v.funct3 == id.funct3,
                 .funct_3_7 => |*v| return v.funct3 == id.funct3 and v.funct7 == id.funct7,
                 .funct_3_6 => |*v| return v.funct3 == id.funct3 and v.funct6 == (id.funct7 >> 1),
+                .direct_match => |*v| {
+                    const original: u32 = @bitCast(id);
+                    return original == v.*;
+                },
             }
             return false;
         }
@@ -923,6 +1016,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .trap_mode = .Direct,
                 .mepc = 0,
                 .mcause = 0,
+                .sepc = 0,
+                .scause = 0,
                 .current_privilege_level = .Machine,
                 .mpp = .Machine,
                 .spp = .User,
@@ -1433,8 +1528,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .Supervisor => self.trap(10),
                     .Machine => self.trap(11),
                 }
-            } else if (instruction == 0x30200073) { // MRET
-                self.pc = self.mepc;
             } else {
                 @panic("Unknown instruction");
             }
@@ -1666,6 +1759,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleGetpriv(self: *Self, instruction: u32) void {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(parsed.rd, @intCast(self.current_privilege_level.getEncoding()));
+        }
+
+        fn handleMret(self: *Self, _: u32) void {
+            std.debug.print("Handling MRET {}\n", .{self.mie});
+            self.mie = self.mpie;
+            self.pc = self.mepc;
+            // TODO: what is mprv?
+            // if (self.mpp != .Machine) {
+            //     self.mprv = 0;
+            // }
+            self.current_privilege_level = self.mpp;
+            self.mpie = true;
+            self.mpp = .User;
         }
 
         fn handleNop(_: *Self, _: u32) void { }

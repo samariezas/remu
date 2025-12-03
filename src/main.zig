@@ -64,7 +64,7 @@ pub fn main() !u8 {
         defer result.deinit(allocator);
         switch (result) {
             .Discrepancy => |d| {
-                try stdout_writer.writeAll("Test failed\n");
+                try stdout_writer.writeAll("Discrepancy detected!\n");
                 try stdout_writer.print("REMU   exit code: {any}\n", .{d.remu_results.failure_code});
                 try stdout_writer.print("Golden exit code: {any}\n", .{d.spike_results.process_result});
                 try stdout_writer.print("REMU   signature: {s}\n",
