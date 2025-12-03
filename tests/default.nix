@@ -24,6 +24,7 @@ in rec {
 
     patches = [
         ./spike_getpriv.patch
+        ./spike_csrr_debug.patch
     ];
 
     doCheck = false;

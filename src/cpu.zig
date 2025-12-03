@@ -675,6 +675,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 		Instr.makeF3("CSRRWI", 0b1110011, 5, handleCsrrwi, null),
 		Instr.makeF3("CSRRSI", 0b1110011, 6, handleCsrrsi, null),
 		Instr.makeF3("CSRRCI", 0b1110011, 7, handleCsrrci, null),
+		Instr.makeF3("CSRR_DEBUG", 0b1110011, 4, handleCsrr_debug, null),
 
                 // TODO: hide under some "debug" flag
                 Instr.makeF37("GETPRIV", 0b0001011, 0, 0x78, handleGetpriv, null),
@@ -1708,6 +1709,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 self.setRegister(parsed.rd, old_csr);
             }
             std.debug.assert(self.writeCsr(parsed.imm, self.getRegister(parsed.rs1)));
+        }
+        
+        fn handleCsrr_debug(self: *Self, instruction: u32) void {
+            const parsed: ITypeInstruction = @bitCast(instruction);
+            if (parsed.rd != 0) {
+                const csr = self.readCsr(parsed.imm).?;
+                self.setRegister(parsed.rd, csr);
+            }
         }
 
         fn handleCsrrs(self: *Self, instruction: u32) void {

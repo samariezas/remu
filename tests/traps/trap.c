@@ -2,12 +2,15 @@
 #include <stdbool.h>
 #include <printf.h>
 
-
 #define ELEM(X) (sizeof(X) / sizeof(X[0]))
 
+// TODO: fix false success when failing step_idx=0
+// TODO: fix define mess
 #define TEST_PASS() do { write_tohost(0); } while(0)
-#define TEST_FAILED_SPEC(num) do { write_tohost(num); } while(0)
+#define TEST_FAILED_SPEC(num) _test_failed(num, __LINE__);
+// #define TEST_FAILED_SPEC(num) do { write_tohost(num); } while(0)
 #define TEST_FAILED() TEST_FAILED_SPEC(step_idx)
+
 
 #define TOHOST      __attribute__((section(".tohost")))
 #define SIGNATURE   __attribute__((section(".data.signature")))
@@ -25,6 +28,11 @@ static void write_tohost(uint64_t val) {
     while(1) {
         tohost = val;
     }
+}
+
+static void _test_failed(unsigned int num, unsigned int line_num) {
+    printf_("Test failed on line %u, code %u\n", line_num, num);
+    write_tohost(num);
 }
 
 static void rvtest_assert(bool val, unsigned int line_num) {
@@ -56,6 +64,28 @@ static priv_level_t get_priv(void) {
         : "=r" (retval)
     );
     return retval;
+}
+
+static uint64_t get_csr_no_privcheck(uint32_t csr) {
+    uint64_t retval;
+    __asm__ __volatile__(
+        ".insn i 0x73, 4, %0, x0, %1"
+        : "=r" (retval)
+        : "i" (csr)
+    );
+    return retval;
+}
+
+static uint64_t get_mcause_noprivcheck(void) {
+    return get_csr_no_privcheck(0x342);
+}
+
+static uint64_t get_mstatus_noprivcheck(void) {
+    return get_csr_no_privcheck(0x300);
+}
+
+static uint64_t get_mepc_noprivcheck(void) {
+    return get_csr_no_privcheck(0x341);
 }
 
 /* Steps */
@@ -94,7 +124,6 @@ void ecall(void) {
 }
 
 void drop_from_machine_to_user(void) {
-    ASSERT(usermode_entry);
     asm volatile (
         "li t0, %0\n"
         "csrrc x0, mstatus, t0\n"
@@ -158,16 +187,12 @@ void c_trap_handler(void) {
 
     priv_level_t current_privilege = get_priv();
     printf_("TRAP step %i, priv=%s\n", step_idx, priv_level_to_str(current_privilege));
-    if (current_privilege == PRIV_MACHINE) {
-        uint64_t mcause, mepc, mstatus;
-        __asm__ __volatile__ (
-            "csrr %0, mcause;"
-            "csrr %1, mepc;"
-            "csrr %2, mstatus;"
-            : "=r" (mcause), "=r" (mepc), "=r" (mstatus)
-        );
-        printf_("mcause=%lx, mepc=%lx, mstatus=%lx\n", mcause, mepc, mstatus);
-    }
+    printf_(
+        "mcause=%lx, mepc=%lx, mstatus=%lx\n",
+        get_mcause_noprivcheck(),
+        get_mepc_noprivcheck(),
+        get_mstatus_noprivcheck()
+    );
     step_idx++;
     currently_handling = false;
 }

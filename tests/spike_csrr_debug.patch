@@ -1,0 +1,71 @@
+diff --git a/disasm/disasm.cc b/disasm/disasm.cc
+index 068ca97c..e1a6eced 100644
+--- a/disasm/disasm.cc
++++ b/disasm/disasm.cc
+@@ -1078,6 +1078,7 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
+   add_insn(new disasm_insn_t("csrrwi", match_csrrwi, mask_csrrwi, {&xrd, &csr, &zimm5}));
+   add_insn(new disasm_insn_t("csrrsi", match_csrrsi, mask_csrrsi, {&xrd, &csr, &zimm5}));
+   add_insn(new disasm_insn_t("csrrci", match_csrrci, mask_csrrci, {&xrd, &csr, &zimm5}));
++  add_insn(new disasm_insn_t("csrr_debug", match_csrr_debug, mask_csrr_debug, {&xrd, &csr}));
+ 
+   if (ext_enabled('S')) {
+     DEFINE_NOARG(sret);
+diff --git a/riscv/encoding.h b/riscv/encoding.h
+index e452f8db..93772ff2 100644
+--- a/riscv/encoding.h
++++ b/riscv/encoding.h
+@@ -900,6 +900,8 @@
+ #define MASK_CSRRSI 0x707f
+ #define MATCH_CSRRW 0x1073
+ #define MASK_CSRRW 0x707f
++#define MATCH_CSRR_DEBUG 0x4073
++#define MASK_CSRR_DEBUG 0x707f
+ #define MATCH_CSRRWI 0x5073
+ #define MASK_CSRRWI 0x707f
+ #define MATCH_CTZ 0x60101013
+@@ -3287,6 +3289,7 @@ DECLARE_INSN(csrrs, MATCH_CSRRS, MASK_CSRRS)
+ DECLARE_INSN(csrrsi, MATCH_CSRRSI, MASK_CSRRSI)
+ DECLARE_INSN(csrrw, MATCH_CSRRW, MASK_CSRRW)
+ DECLARE_INSN(csrrwi, MATCH_CSRRWI, MASK_CSRRWI)
++DECLARE_INSN(csrr_debug, MATCH_CSRR_DEBUG, MASK_CSRR_DEBUG)
+ DECLARE_INSN(ctz, MATCH_CTZ, MASK_CTZ)
+ DECLARE_INSN(ctzw, MATCH_CTZW, MASK_CTZW)
+ DECLARE_INSN(czero_eqz, MATCH_CZERO_EQZ, MASK_CZERO_EQZ)
+diff --git a/riscv/insns/csrr_debug.h b/riscv/insns/csrr_debug.h
+new file mode 100644
+index 00000000..df317831
+--- /dev/null
++++ b/riscv/insns/csrr_debug.h
+@@ -0,0 +1,4 @@
++int csr = validate_csr(insn.csr(), false);
++reg_t old = p->get_csr(csr);
++WRITE_RD(sext_xlen(old));
++serialize();
+diff --git a/riscv/opcodes.h b/riscv/opcodes.h
+index 2ca73321..1613dd59 100644
+--- a/riscv/opcodes.h
++++ b/riscv/opcodes.h
+@@ -140,6 +140,11 @@ static uint32_t csrrw(unsigned int rd, unsigned int rs1, unsigned int csr) {
+   return (csr << 20) | (rs1 << 15) | (rd << 7) | MATCH_CSRRW;
+ }
+ 
++static uint32_t csrr_debug(unsigned int rd, unsigned int csr) __attribute__ ((unused));
++static uint32_t csrr_debug(unsigned int rd, unsigned int csr) {
++  return (csr << 20) | (rd << 7) | MATCH_CSRR_DEBUG;
++}
++
+ static uint32_t fsw(unsigned int src, unsigned int base, uint16_t offset) __attribute__ ((unused));
+ static uint32_t fsw(unsigned int src, unsigned int base, uint16_t offset)
+ {
+diff --git a/riscv/riscv.mk.in b/riscv/riscv.mk.in
+index 5b5c1b8f..731d151f 100644
+--- a/riscv/riscv.mk.in
++++ b/riscv/riscv.mk.in
+@@ -903,6 +903,7 @@ riscv_insn_priv = \
+ 	csrrs \
+ 	csrrsi \
+ 	csrrw \
++	csrr_debug \
+ 	csrrwi \
+ 	dret \
+ 	ebreak \
