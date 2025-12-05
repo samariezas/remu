@@ -1,7 +1,11 @@
 .section .text.boot
 .align  6
-.globl _start
 .extern _stack_start
+.extern c_start
+.extern c_entry
+.extern c_trap_handler
+
+.globl _start
 _start:
     # TODO: zero-out .bss? or check it is zeroed?
     la t0, _trap_handler
@@ -12,7 +16,6 @@ _start:
 
 .section .text
 .globl _trap_handler
-.extern c_trap_handler
 _trap_handler:
     call c_trap_handler
     la sp, _stack_start

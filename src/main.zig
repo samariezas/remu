@@ -29,7 +29,11 @@ fn printBinary(data: []const u8, offset: u64) void {
 pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+    const raw_stdout_writer = std.io.getStdOut().writer().any();
+    var buffered_writer = std.io.bufferedWriter(raw_stdout_writer);
+    const stdout_writer = buffered_writer.writer().any();
     defer {
+        buffered_writer.flush() catch unreachable;
         const deinit_status = gpa.deinit();
         if (deinit_status == .leak) {
             @panic("memory leak detected");
@@ -40,10 +44,6 @@ pub fn main() !u8 {
     var args = std.process.args();
     std.debug.assert(args.skip());
     const run_type = args.next() orelse @panic("Missing run type argument");
-    const raw_stdout_writer = std.io.getStdOut().writer().any();
-    var buffered_writer = std.io.bufferedWriter(raw_stdout_writer);
-    defer buffered_writer.flush() catch unreachable;
-    const stdout_writer = buffered_writer.writer().any();
     if (std.mem.eql(u8, run_type, "remu")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());

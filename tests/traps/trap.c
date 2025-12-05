@@ -1,90 +1,8 @@
-#include <stdint.h>
 #include <stdbool.h>
 #include <printf.h>
-
-#define ELEM(X) (sizeof(X) / sizeof(X[0]))
-
-// TODO: fix false success when failing step_idx=0
-// TODO: fix define mess
-#define TEST_PASS() do { write_tohost(0); } while(0)
-#define TEST_FAILED_SPEC(num) _test_failed(num, __LINE__);
-// #define TEST_FAILED_SPEC(num) do { write_tohost(num); } while(0)
-#define TEST_FAILED() TEST_FAILED_SPEC(step_idx)
-
-
-#define TOHOST      __attribute__((section(".tohost")))
-#define SIGNATURE   __attribute__((section(".data.signature")))
-#define ASSERT(x) do { rvtest_assert((x), __LINE__); } while(0)
-
-typedef void (*step_function_t)(void);
-void c_trap_handler(void);
-void c_entry(void);
-
-TOHOST volatile uint64_t tohost = 0, fromhost = 0;
-static volatile int step_idx = 0;
-
-static void write_tohost(uint64_t val) {
-    val = val << 1 | 1;
-    while(1) {
-        tohost = val;
-    }
-}
-
-static void _test_failed(unsigned int num, unsigned int line_num) {
-    printf_("Test failed on line %u, code %u\n", line_num, num);
-    write_tohost(num);
-}
-
-static void rvtest_assert(bool val, unsigned int line_num) {
-    if (!val) {
-        printf_("Assertion failed on line %u\n", line_num);
-        TEST_FAILED();
-    }
-}
-
-typedef enum {
-    PRIV_USER = 0,
-    PRIV_SUPERVISOR = 1,
-    PRIV_MACHINE = 3,
-} priv_level_t;
-
-const char *priv_level_to_str(priv_level_t level) {
-    switch (level) {
-        case PRIV_USER: return "USER";
-        case PRIV_SUPERVISOR: return "SUPERVISOR";
-        case PRIV_MACHINE: return "MACHINE";
-        default: return "UNKNOWN";
-    }
-}
-
-static priv_level_t get_priv(void) {
-    uint64_t retval;
-    __asm__ __volatile__(
-        ".insn u 0xb, %0, 0xf0f00"
-        : "=r" (retval)
-    );
-    return retval;
-}
-
-static uint64_t get_csr_no_privcheck(uint32_t csr) {
-    uint64_t retval;
-    __asm__ __volatile__(
-        ".insn i 0x73, 4, %0, x0, %1"
-        : "=r" (retval)
-        : "i" (csr)
-    );
-    return retval;
-}
-
-static uint64_t get_mcause_noprivcheck(void) { return get_csr_no_privcheck(0x342); }
-static uint64_t get_mstatus_noprivcheck(void) { return get_csr_no_privcheck(0x300); }
-static uint64_t get_mepc_noprivcheck(void) { return get_csr_no_privcheck(0x341); }
-static uint64_t get_scause_noprivcheck(void) { return get_csr_no_privcheck(0x142); }
-static uint64_t get_sstatus_noprivcheck(void) { return get_csr_no_privcheck(0x100); }
-static uint64_t get_sepc_noprivcheck(void) { return get_csr_no_privcheck(0x141); }
+#include "tests.h"
 
 /* Steps */
-
 void test_illegal_instruction(void) {
     asm volatile (".word 0x69420");
 }
@@ -173,15 +91,15 @@ SIGNATURE static volatile struct {
 void dump_csrs(void) {
     printf_(
         "mcause=%lx, mepc=%lx, mstatus=%lx\n",
-        get_mcause_noprivcheck(),
-        get_mepc_noprivcheck(),
-        get_mstatus_noprivcheck()
+        get_mcause_no_privcheck(),
+        get_mepc_no_privcheck(),
+        get_mstatus_no_privcheck()
     );
     printf_(
         "scause=%lx, sepc=%lx, sstatus=%lx\n",
-        get_scause_noprivcheck(),
-        get_sepc_noprivcheck(),
-        get_sstatus_noprivcheck()
+        get_scause_no_privcheck(),
+        get_sepc_no_privcheck(),
+        get_sstatus_no_privcheck()
     );
 }
 
@@ -200,11 +118,6 @@ void c_trap_handler(void) {
     dump_csrs();
     step_idx++;
     currently_handling = false;
-}
-
-void putchar_(char c) {
-    static char *UART_DEVICE = (char*)0x10000000;
-    *UART_DEVICE = c;
 }
 
 void c_start(void) {
