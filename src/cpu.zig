@@ -1110,25 +1110,24 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return self.signature_start != self.signature_end;
         }
 
-        fn findCsr(self: *Self, id: Tcsrid) ?*const CsrMapEntry {
-            _ = self; // TODO: fix
-            for (csr_map) |csr| {
+        fn findCsr(id: Tcsrid) ?*const CsrMapEntry {
+            for (&csr_map) |*csr| {
                 if (csr.id == id) {
-                    return &csr;
+                    return csr;
                 }
             }
             return null;
         }
 
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
-            if (self.findCsr(id)) |csr| {
+            if (findCsr(id)) |csr| {
                 return csr.read_handler(self);
             }
             return null;
         }
 
         fn writeCsr(self: *Self, id: Tcsrid, value: Tword) bool {
-            if (self.findCsr(id)) |csr| {
+            if (findCsr(id)) |csr| {
                 csr.write_handler(self, value);
                 return true;
             }
