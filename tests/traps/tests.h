@@ -25,7 +25,8 @@ extern volatile int step_idx;
 int printf_(const char* format, ...);
 void c_start(void);
 void c_entry(void);
-void c_trap_handler(void);
+void c_s_trap_handler(void);
+void c_m_trap_handler(void);
 
 void write_tohost(uint64_t val);
 void _test_failed(unsigned int failure_code, unsigned int line_num);
@@ -33,6 +34,7 @@ void rvtest_assert(bool val, unsigned int line_num);
 const char *priv_level_to_str(priv_level_t level);
 priv_level_t get_priv(void);
 void putchar_(char c);
+void dump_csrs(void);
 
 static uint64_t get_csr_no_privcheck(uint32_t csr) {
     uint64_t retval;
@@ -44,14 +46,23 @@ static uint64_t get_csr_no_privcheck(uint32_t csr) {
     return retval;
 }
 
-#define MAKE_CSR_GETTER(name, id) static uint64_t get_ ## name ## _no_privcheck(void) \
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define CSR_LIST \
+    X_CSR(mtvec, 0x305) \
+    X_CSR(mepc, 0x341) \
+    X_CSR(mcause, 0x342) \
+    X_CSR(mstatus, 0x300) \
+    X_CSR(stvec, 0x105) \
+    X_CSR(sepc, 0x141) \
+    X_CSR(scause, 0x142) \
+    X_CSR(sstatus, 0x100) \
+    X_CSR(medeleg, 0x302)
+
+#define X_CSR(name, id) static uint64_t get_ ## name ## _no_privcheck(void) \
     { return get_csr_no_privcheck((id)); }
-MAKE_CSR_GETTER(mcause, 0x342)
-MAKE_CSR_GETTER(mstatus, 0x300)
-MAKE_CSR_GETTER(mepc, 0x341)
-MAKE_CSR_GETTER(scause, 0x142)
-MAKE_CSR_GETTER(sstatus, 0x100)
-MAKE_CSR_GETTER(sepc, 0x141)
-#undef MAKE_CSR_GETTER
+CSR_LIST
+#undef X_CSR
 
 #endif // TESTS_H_

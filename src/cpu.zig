@@ -533,8 +533,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         signature_end: Tword,
         tohost_address: Tword,
 
-        trap_handler_address: Tword,
-        trap_mode: TrapMode,
+        m_trap_handler_address: Tword,
+        m_trap_mode: TrapMode,
+        s_trap_handler_address: Tword,
+        s_trap_mode: TrapMode,
         mepc: Tword,
         mcause: Tword,
         sepc: Tword,
@@ -712,33 +714,49 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         };
 
-        const MTVecCSR = packed struct {
+        const TrapVectorCSR = packed struct {
             mode: u2,
             base: subtractBits(Tword, 2),
 
-            fn getBase(self: MTVecCSR) Tword {
+            fn getBase(self: TrapVectorCSR) Tword {
                 const base_extended: Tword = @intCast(self.base);
                 return base_extended << 2;
             }
 
-            fn getMode(self: MTVecCSR) ?TrapMode {
+            fn getMode(self: TrapVectorCSR) ?TrapMode {
                 return TrapMode.fromEncoding(self.mode);
             }
 
-            fn handleWrite(cpu: *Self, value: Tword) void {
-                const parsed: MTVecCSR = @bitCast(value);
+            fn handleWrite(trap_mode: *TrapMode, trap_handler_address: *Tword, value: Tword) void {
+                const parsed: TrapVectorCSR = @bitCast(value);
                 if (parsed.getMode()) |mode| {
-                    cpu.trap_mode = mode;
+                    trap_mode.* = mode;
                 }
-                cpu.trap_handler_address = parsed.getBase();
+                trap_handler_address.* = parsed.getBase();
             }
 
-            fn handleRead(cpu: *Self) Tword {
-                const retval = MTVecCSR {
-                    .mode = cpu.trap_mode.getEncoding(),
-                    .base = @truncate(cpu.trap_handler_address >> 2),
+            fn handleRead(trap_mode: *const TrapMode, trap_handler_address: *const Tword) Tword {
+                const retval = TrapVectorCSR {
+                    .mode = trap_mode.*.getEncoding(),
+                    .base = @truncate(trap_handler_address.* >> 2),
                 };
                 return @bitCast(retval);
+            }
+
+            fn handleWriteM(cpu: *Self, value: Tword) void {
+                TrapVectorCSR.handleWrite(&cpu.m_trap_mode, &cpu.m_trap_handler_address, value);
+            }
+
+            fn handleWriteS(cpu: *Self, value: Tword) void {
+                TrapVectorCSR.handleWrite(&cpu.s_trap_mode, &cpu.s_trap_handler_address, value);
+            }
+
+            fn handleReadM(cpu: *Self) Tword {
+                return TrapVectorCSR.handleRead(&cpu.m_trap_mode, &cpu.m_trap_handler_address);
+            }
+
+            fn handleReadS(cpu: *Self) Tword {
+                return TrapVectorCSR.handleRead(&cpu.s_trap_mode, &cpu.s_trap_handler_address);
             }
         };
 
@@ -904,18 +922,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteScause(cpu: *Self, value: Tword) void { cpu.scause = value; }
         fn handleReadScause(cpu: *Self) Tword { return cpu.scause; }
 
-        fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value; }
+        fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value & 0xfcb7ff; }
         fn handleReadMedeleg(cpu: *Self) Tword { return cpu.medeleg; }
 
         const csr_map = [_]CsrMapEntry{
-            CsrMapEntry.new("mtvec",   0x305, MTVecCSR.handleWrite,   MTVecCSR.handleRead),
-            CsrMapEntry.new("mepc",    0x341, handleWriteMepc,        handleReadMepc),
-            CsrMapEntry.new("mcause",  0x342, handleWriteMcause,      handleReadMcause),
-            CsrMapEntry.new("mstatus", 0x300, MStatusCSR.handleWrite, MStatusCSR.handleRead),
+            CsrMapEntry.new("mtvec",   0x305, TrapVectorCSR.handleWriteM,   TrapVectorCSR.handleReadM),
+            CsrMapEntry.new("mepc",    0x341, handleWriteMepc,              handleReadMepc),
+            CsrMapEntry.new("mcause",  0x342, handleWriteMcause,            handleReadMcause),
+            CsrMapEntry.new("mstatus", 0x300, MStatusCSR.handleWrite,       MStatusCSR.handleRead),
 
-            CsrMapEntry.new("sepc",    0x141, handleWriteSepc,        handleReadSepc),
-            CsrMapEntry.new("scause",  0x142, handleWriteScause,      handleReadScause),
-            CsrMapEntry.new("sstatus", 0x100, SStatusCSR.handleWrite, SStatusCSR.handleRead),
+            CsrMapEntry.new("stvec",   0x105, TrapVectorCSR.handleWriteS,   TrapVectorCSR.handleReadS),
+            CsrMapEntry.new("sepc",    0x141, handleWriteSepc,              handleReadSepc),
+            CsrMapEntry.new("scause",  0x142, handleWriteScause,            handleReadScause),
+            CsrMapEntry.new("sstatus", 0x100, SStatusCSR.handleWrite,       SStatusCSR.handleRead),
 
             CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,     handleReadMedeleg),
         };
@@ -987,7 +1006,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn trap_to_mmode(self: *Self, cause: Tword) void {
             self.mepc = self.pc;
             self.mcause = cause;
-            self.pc = self.trap_handler_address;
+            self.pc = self.m_trap_handler_address;
             self.mpie = self.mie;
             self.mie = false;
             self.mpp = self.current_privilege_level;
@@ -997,7 +1016,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn trap_to_smode(self: *Self, cause: Tword) void {
             self.sepc = self.pc;
             self.scause = cause;
-            self.pc = self.trap_handler_address;
+            self.pc = self.s_trap_handler_address;
             self.spie = self.sie;
             self.sie = false;
             self.spp = switch (self.current_privilege_level) {
@@ -1058,8 +1077,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .signature_start = signature_start,
                 .signature_end = signature_end,
                 .tohost_address = tohost_address,
-                .trap_handler_address = 0,
-                .trap_mode = .Direct,
+                .m_trap_handler_address = 0,
+                .m_trap_mode = .Direct,
+                .s_trap_handler_address = 0,
+                .s_trap_mode = .Direct,
                 .mepc = 0,
                 .mcause = 0,
                 .sepc = 0,
@@ -1828,12 +1849,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleSret(self: *Self, _: u32) void {
+            // self.bus.findSerial().?.*.print("DEBUG: Dropping to {any}\n", .{self.spp}) catch unreachable;
             self.sie = self.spie;
             self.pc = self.sepc;
             // TODO: is there sprv, like mprv?
             self.current_privilege_level = self.spp.toRegular();
             self.spie = true;
-            self.mpp = .User;
+            self.spp = .User;
         }
 
         fn handleNop(_: *Self, _: u32) void { }

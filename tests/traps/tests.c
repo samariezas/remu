@@ -46,6 +46,17 @@ priv_level_t get_priv(void) {
     return retval;
 }
 
+void dump_csrs(void) {
+#define X_CSR(name, id) STRINGIFY(name) "=%lx, "
+    const char *format = CSR_LIST "\n";
+#undef X_CSR
+
+#define X_CSR(name, id) get_ ## name ## _no_privcheck(),
+    printf_(format,
+        CSR_LIST 0);
+#undef X_CSR
+}
+
 void putchar_(char c) {
     static char *UART_DEVICE = (char*)0x10000000;
     *UART_DEVICE = c;
