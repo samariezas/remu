@@ -405,6 +405,67 @@ pub fn runSingle(
     return RunDiscrepancy.init(allocator, spike_result, remu_result);
 }
 
+pub fn printDiff(
+    allocator: Allocator,
+    str1: []const u8,
+    str2: []const u8
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+    const str1_read_fd, const str1_write_fd = try posix.pipe2(std.os.linux.O { .NONBLOCK = true });
+    const str2_read_fd, const str2_write_fd = try posix.pipe2(std.os.linux.O { .NONBLOCK = true });
+    errdefer {
+        posix.close(str1_read_fd);
+        posix.close(str1_write_fd);
+        posix.close(str2_read_fd);
+        posix.close(str2_write_fd);
+    }
+    const str1_arg = try std.fmt.allocPrintZ(arena_allocator, "/proc/self/fd/{}", .{str1_read_fd});
+    const str2_arg = try std.fmt.allocPrintZ(arena_allocator, "/proc/self/fd/{}", .{str2_read_fd});
+    const environment = try std.process.createEnvironFromExisting(
+        arena_allocator,
+        std.c.environ,
+        .{},
+    );
+    const child_arguments = [_:null]?[*:0]const u8 {
+        "diff",
+        str1_arg,
+        str2_arg
+    };
+    const child_pid = try posix.fork();
+    if (child_pid == 0) {
+        posix.close(str1_write_fd);   
+        posix.close(str2_write_fd);   
+        posix.execvpeZ(
+            "diff",
+            &child_arguments,
+            environment
+        ) catch unreachable;
+    }
+    posix.close(str1_read_fd);
+    posix.close(str2_read_fd);
+    var str1_cpy = str1;
+    var str2_cpy = str2;
+    while (str1_cpy.len > 0 and str2_cpy.len > 0) {
+        const str1_cpy_write_count = @min(str1_cpy.len, 4096);
+        const str1_cpy_wrote = posix.write(str1_write_fd, str1_cpy[0..str1_cpy_write_count]) catch |err| switch(err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
+        str1_cpy = str1_cpy[str1_cpy_wrote..];
+        const str2_cpy_write_count = @min(str2_cpy.len, 4096);
+        const str2_cpy_wrote = posix.write(str2_write_fd, str2_cpy[0..str2_cpy_write_count]) catch |err| switch(err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
+        str2_cpy = str2_cpy[str2_cpy_wrote..];
+    }
+    posix.close(str1_write_fd);
+    posix.close(str2_write_fd);
+    _ = posix.waitpid(child_pid, 0);
+}
+
 // TODO: reimplement
 // fn runMulti(
 //     comptime opt: CpuOptions,

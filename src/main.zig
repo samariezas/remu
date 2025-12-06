@@ -73,6 +73,9 @@ pub fn main() !u8 {
                     .{std.fmt.fmtSliceHexLower(d.spike_results.signature)});
                 try stdout_writer.print("REMU   serial:\n--------\n{s}--------\n", .{d.remu_results.serial_output});
                 try stdout_writer.print("Golden serial:\n--------\n{s}--------\n", .{d.spike_results.stdout});
+                try stdout_writer.writeAll("Diff:\n");
+                try buffered_writer.flush();
+                try tests.printDiff(allocator, d.remu_results.serial_output, d.spike_results.stdout);
                 return 1;
             },
             .NoDiscrepancy => |d| {
