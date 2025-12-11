@@ -21,13 +21,9 @@ _start:
 _s_trap_handler:
     call c_s_trap_handler
     la sp, _stack_start
-    la t0, c_entry
-    csrw sepc, t0
-    sret
+    j c_entry
 
 _m_trap_handler:
     call c_m_trap_handler
     la sp, _stack_start
-    la t0, c_entry
-    csrw mepc, t0
-    mret
+    j c_entry

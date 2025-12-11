@@ -842,10 +842,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .mdt = 0, // TODO: implement? double traps
                     .sd = 0, // fs, vs and xs
                 };
-                // std.debug.print("Reading mstatus: {any}\n", .{retval});
                 const retval_word: Tword = @bitCast(retval);
-                // std.debug.print("Mstatus word: {x:0>16}\n", .{retval_word});
-                cpu.writer.print("Writing mstatus: {x:0>16}\n", .{retval_word}) catch unreachable;
                 return retval_word;
             }
         };
@@ -1000,7 +997,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 }
             }
             try self.writer.writeAll("Trapping!\n");
-            self.trap(0x2);
+            self.trap(2);
         }
 
         fn trap_to_mmode(self: *Self, cause: Tword) void {
@@ -1592,7 +1589,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 // };
                 switch (self.current_privilege_level) {
                     .User => self.trap(8),
-                    .Supervisor => self.trap(10),
+                    .Supervisor => self.trap(9),
                     .Machine => self.trap(11),
                 }
             } else {

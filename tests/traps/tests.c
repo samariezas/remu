@@ -5,14 +5,14 @@ static volatile uint64_t tohost = 0;
 static volatile uint64_t fromhost = 0;
 volatile int step_idx = 0;
 
-void write_tohost(uint64_t val) {
+noreturn void write_tohost(uint64_t val) {
     val = val << 1 | 1;
     while(1) {
         tohost = val;
     }
 }
 
-void _test_failed(unsigned int failure_code, unsigned int line_num) {
+noreturn void _test_failed(unsigned int failure_code, unsigned int line_num) {
     if (failure_code == 0) {
         printf_("FIXME: failure code is 0, line %u!", line_num);
         write_tohost(1);

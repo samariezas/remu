@@ -9,7 +9,7 @@ void test_illegal_instruction(void) {
 
 /* Dropping/raising privilege levels */
 // TODO: usermode_entry and supervisor_entry should reset the stack
-void usermode_entry(void) {
+noreturn static void usermode_entry(void) {
     priv_level_t priv = get_priv();
     if (priv == PRIV_USER) {
         printf_("Entered user priv\n");
@@ -21,7 +21,7 @@ void usermode_entry(void) {
     c_entry();
 }
 
-void supervisor_entry(void) {
+noreturn static void supervisor_entry(void) {
     priv_level_t priv = get_priv();
     if (priv == PRIV_SUPERVISOR) {
         printf_("Entered supervisor priv\n");
@@ -33,11 +33,13 @@ void supervisor_entry(void) {
     c_entry();
 }
 
-void ecall(void) {
+noreturn static void ecall(void) {
     asm volatile ("ecall");
+    TEST_FAILED();
 }
 
-void drop_from_machine_to_user(void) {
+noreturn static void drop_from_machine_to_user(void) {
+    ASSERT(get_priv() == PRIV_MACHINE);
     asm volatile (
         "li t0, %0\n"
         "csrrc x0, mstatus, t0\n"
@@ -46,9 +48,11 @@ void drop_from_machine_to_user(void) {
         :: "i"(3UL << 11), "r"(usermode_entry)
         : "t0"
     );
+    while(1);
 }
 
-void drop_to_supervisor(void) {
+noreturn static void drop_from_machine_to_supervisor(void) {
+    ASSERT(get_priv() == PRIV_MACHINE);
     asm volatile (
         "li t0, %0\n"
         "csrrc x0, mstatus, t0\n"
@@ -59,9 +63,11 @@ void drop_to_supervisor(void) {
         :: "i"(3UL << 11), "i"(1UL << 11), "r"(supervisor_entry)
         : "t0"
     );
+    while(1);
 }
 
-void drop_from_supervisor_to_user(void) {
+noreturn static void drop_from_supervisor(void) {
+    ASSERT(get_priv() == PRIV_SUPERVISOR);
     asm volatile (
         "li t0, %0\n"
         "csrrc x0, sstatus, t0\n"
@@ -70,38 +76,44 @@ void drop_from_supervisor_to_user(void) {
         :: "i"(1UL << 8), "r"(usermode_entry)
         : "t0"
     );
+    while(1);
 }
 
-void write_medeleg(uint64_t val) {
+void delegate_traps(void) {
     asm volatile (
-        "csrw medeleg, %0\n"
-        :: "r"(val)
+        "csrs medeleg, %0\n"
+        :: "r"(
+            EXCEPTION_MASK_ECALL_FROM_S |
+            EXCEPTION_MASK_ECALL_FROM_U |
+            EXCEPTION_MASK_ILLEGAL_INSTR
+        )
     );
-}
-
-void set_medeleg(void) {
-    write_medeleg((int64_t)-1);
-}
-
-void clear_medeleg(void) {
-    write_medeleg(0);
 }
 
 typedef struct {
     const char *name;
     step_function_t fn;
+    priv_level_t expected_priv;
     bool expect_trap;
 } step_t;
 
-#define MAKE_STEP(fn, expect_trap) { TOSTRING(fn), (fn), (expect_trap) }
+#define MAKE_STEP(fn, expected_priv, expect_trap) { TOSTRING(fn), (fn), (expected_priv), (expect_trap) }
 static step_t steps[] = {
-    MAKE_STEP(set_medeleg,                      false),
-    MAKE_STEP(test_illegal_instruction,         true),
-    MAKE_STEP(ecall,                            true),
-    MAKE_STEP(drop_to_supervisor,               true),
-    MAKE_STEP(test_illegal_instruction,         true),
-    MAKE_STEP(drop_from_supervisor_to_user,     true),
-    // MAKE_STEP(ecall,                            true),
+    MAKE_STEP(test_illegal_instruction,         PRIV_MACHINE,    true),
+    MAKE_STEP(ecall,                            PRIV_MACHINE,    true),
+    MAKE_STEP(drop_from_machine_to_supervisor,  PRIV_MACHINE,    true),
+    MAKE_STEP(test_illegal_instruction,         PRIV_SUPERVISOR, true),
+    MAKE_STEP(drop_from_machine_to_user,        PRIV_MACHINE,    true),
+    MAKE_STEP(test_illegal_instruction,         PRIV_USER,       true),
+    MAKE_STEP(drop_from_machine_to_supervisor,  PRIV_MACHINE,    true),
+    MAKE_STEP(ecall,                            PRIV_SUPERVISOR, true),
+
+    MAKE_STEP(delegate_traps,                   PRIV_MACHINE,    false),
+    MAKE_STEP(drop_from_machine_to_user,        PRIV_MACHINE,    true),
+    MAKE_STEP(test_illegal_instruction,         PRIV_USER,       true),
+    MAKE_STEP(drop_from_supervisor,             PRIV_SUPERVISOR, true),
+    MAKE_STEP(ecall,                            PRIV_USER,       true),
+    MAKE_STEP(ecall,                            PRIV_SUPERVISOR, true),
 };
 
 static volatile bool should_trap = false;
@@ -136,9 +148,10 @@ void c_start(void) {
     dump_csrs();
 }
 
-void c_entry(void) {
+noreturn void c_entry(void) {
     static int previous_idx = -1;
-    printf_("Entrypoint reached, priv=%s\n", priv_level_to_str(get_priv()));
+    priv_level_t current_priv = get_priv();
+    printf_("Entrypoint reached, priv=%s\n", priv_level_to_str(current_priv));
     while (step_idx < ELEM(steps)) {
         step_t *step = &steps[step_idx];
         printf_("Executing step %i (%s)\n", step_idx, step->name);
@@ -149,6 +162,14 @@ void c_entry(void) {
         }
         previous_idx = step_idx;
         should_trap = step->expect_trap;
+        if (step->expected_priv != current_priv) {
+            printf_(
+                "Invalid privilege, expected %s, found %s\n",
+                priv_level_to_str(step->expected_priv),
+                priv_level_to_str(current_priv)
+            );
+            TEST_FAILED();
+        }
         step->fn();
         if (step->expect_trap) {
             // should have trapped, but we didn't

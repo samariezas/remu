@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <printf.h>
+#include <stdnoreturn.h>
 
 #define ELEM(X) (sizeof(X) / sizeof(X[0]))
 
@@ -24,12 +25,12 @@ extern volatile int step_idx;
 
 int printf_(const char* format, ...);
 void c_start(void);
-void c_entry(void);
+noreturn void c_entry(void);
 void c_s_trap_handler(void);
 void c_m_trap_handler(void);
 
-void write_tohost(uint64_t val);
-void _test_failed(unsigned int failure_code, unsigned int line_num);
+noreturn void write_tohost(uint64_t val);
+noreturn void _test_failed(unsigned int failure_code, unsigned int line_num);
 void rvtest_assert(bool val, unsigned int line_num);
 const char *priv_level_to_str(priv_level_t level);
 priv_level_t get_priv(void);
@@ -64,5 +65,12 @@ static uint64_t get_csr_no_privcheck(uint32_t csr) {
     { return get_csr_no_privcheck((id)); }
 CSR_LIST
 #undef X_CSR
+
+typedef enum {
+    EXCEPTION_MASK_ILLEGAL_INSTR    = (1 << 2),
+    EXCEPTION_MASK_ECALL_FROM_U     = (1 << 8),
+    EXCEPTION_MASK_ECALL_FROM_S     = (1 << 9),
+    EXCEPTION_MASK_ECALL_FROM_M     = (1 << 11),
+} exception_mask_t;
 
 #endif // TESTS_H_
