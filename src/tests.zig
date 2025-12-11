@@ -11,15 +11,6 @@ const Allocator = mem.Allocator;
 const WordSize = cpu_config.WordSize;
 const CpuOptions = cpu_config.CpuOptions;
 
-fn writeNull(_: *const anyopaque, bytes: []const u8) anyerror!usize {
-    return bytes.len;
-}
-
-pub const null_writer = std.io.AnyWriter {
-    .context = undefined,
-    .writeFn = writeNull,
-};
-
 pub fn findAll(allocator: mem.Allocator, start: []const u8, path: fs.Dir) ![][]const u8 {
     var walker = try path.walk(allocator);
     defer walker.deinit();
@@ -237,7 +228,7 @@ pub fn runRemu(
     comptime opt: CpuOptions,
     allocator: Allocator,
     image: []const u8,
-    debug_writer: std.io.AnyWriter,
+    debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
 ) !RemuRunResult {
     const f = try std.fs.cwd().openFile(
@@ -301,7 +292,7 @@ pub fn runRemuAndCollectSerial(
     comptime opt: CpuOptions,
     allocator: Allocator,
     image: []const u8,
-    debug_writer: std.io.AnyWriter,
+    debug_writer: ?std.io.AnyWriter,
 ) !CollectedRemuRunResult {
     var serial_output = std.ArrayList(u8).init(allocator);
     defer serial_output.deinit();
@@ -398,7 +389,7 @@ pub fn runSingle(
     comptime opt: CpuOptions,
     allocator: Allocator,
     image: []const u8,
-    debug_writer: std.io.AnyWriter,
+    debug_writer: ?std.io.AnyWriter,
 ) !RunDiscrepancy {
     const spike_result = try runSpike(allocator, opt.word_size, image);
     const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer);

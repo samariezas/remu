@@ -527,7 +527,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pc: Tword,
         bus: Bus(Tword),
         test_result: ?TestResult(Tword),
-        writer: std.io.AnyWriter,
+        writer: ?std.io.AnyWriter,
         // TODO: refactor everything used for testing (signatures, tohost, results)
         signature_start: Tword,
         signature_end: Tword,
@@ -904,7 +904,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .sd = 0, // fs, vs and xs
                 };
                 const retval_word: Tword = @bitCast(retval);
-                cpu.writer.print("Writing sstatus: {x:0>16}\n", .{retval_word}) catch unreachable;
                 return retval_word;
             }
         };
@@ -935,6 +934,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,     handleReadMedeleg),
         };
+
+        fn debugPrint(self: *Self, comptime format: []const u8, args: anytype) anyerror!void {
+            if (self.writer) |writer| {
+                try writer.print(format, args);
+            }
+        }
 
         fn getRegister(self: *Self, id: usize) Tword {
             return self.registers[id];
@@ -979,24 +984,27 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pub fn tick(self: *Self) !void {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
-            try self.writer.print("Instruction: PC=0x{x:0>8}", .{self.pc});
+            try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
             const instruction = try self.getNextInstruction();
             const instruction_id: InstructionIdentifiers = @bitCast(instruction);
-            try self.writer.print(" Instr=0x{x:0>8}\n", .{instruction});
-            try self.writer.print("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
+            try self.debugPrint(" Instr=0x{x:0>8}\n", .{instruction});
+            try self.debugPrint("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
             for (instructions) |i| {
                 if (matches(instruction_id, &i)) {
-                    try i.print(self.writer, instruction, self.pc);
+                    if (self.writer) |writer| {
+                        try i.print(writer, instruction, self.pc);
+                    }
                     i.handler(self, instruction);
-                    try self.writeRegisters(self.writer, 4);
+                    if (self.writer) |writer| {
+                        try self.writeRegisters(writer, 4);
+                    }
                     if (i.advance_pc) {
                         self.pc += 4;
                     }
-                    try self.writer.writeAll("\n");
+                    try self.debugPrint("\n", .{});
                     return;
                 }
             }
-            try self.writer.writeAll("Trapping!\n");
             self.trap(2);
         }
 
@@ -1058,7 +1066,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             entrypoint: Tword,
             memory_start: Tword,
             memory_length: Tword,
-            writer: std.io.AnyWriter,
+            writer: ?std.io.AnyWriter,
             signature_start: Tword,
             signature_end: Tword,
             tohost_address: Tword,
