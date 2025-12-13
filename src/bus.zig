@@ -231,52 +231,67 @@ const testing = std.testing;
 fn TestEnvironment(Tword: type) type {
     return struct {
         const Self = @This();
+        const BusDeviceCfg = BusDeviceConfig(Tword);
+
         pub const MEMORY_LENGTH: Tword = 0x4000;
         pub const MEMORY_START: Tword = 0x0800_0000;
         pub const SERIAL_START: Tword = 0x1000_0000;
 
         allocator: Allocator,
         serial_output: std.ArrayList(u8),
-        serial_writer: AnyWriter,
 
         fn init() !Self {
             const allocator = std.testing.allocator;
-            var serial_output = std.ArrayList(u8).init(allocator);
-            var serial_writer = serial_output.writer();
             return .{
                 .allocator = allocator,
-                .serial_output = serial_output,
-                .serial_writer = serial_writer.any(),
+                .serial_output = std.ArrayList(u8).init(allocator),
             };
         }
 
-        fn deinit(self: *Self) void {
+        fn deinit(self: *Self) !void {
             self.serial_output.deinit();
+            try testing.expectEqual(self.serial_output.items.len, 0);
         }
 
-        fn makeBus(self: *Self, bus_config: []const BusDeviceConfig(Tword)) !Bus(Tword) {
+        fn getSerial(self: *Self) ![]u8 {
+            return self.serial_output.toOwnedSlice();
+        }
+
+        fn makeBus(self: *Self, bus_config: []const BusDeviceCfg) !Bus(Tword) {
             return try Bus(Tword).init(self.allocator, bus_config);
         }
 
-        fn makeDefaultBus(self: *Self) !Bus(Tword) {
-            const memory_device = BusDeviceConfig(Tword).makeMemory(MEMORY_START, MEMORY_LENGTH);
-            const serial_device = BusDeviceConfig(Tword).makeSerial(SERIAL_START, self.serial_writer);
-            return try self.makeBus(&[_]BusDeviceConfig(Tword) {
-                memory_device,
-                serial_device,
+        fn makeBasicBus(self: *Self) !Bus(Tword) {
+            return try self.makeBus(&[_]BusDeviceCfg {
+                BusDeviceCfg.makeMemory(MEMORY_START, MEMORY_LENGTH),
+            });
+        }
+
+        fn makeSerialBus(self: *Self) !Bus(Tword) {
+            return try self.makeBus(&[_]BusDeviceCfg {
+                BusDeviceCfg.makeMemory(MEMORY_START, MEMORY_LENGTH),
+                BusDeviceCfg.makeSerial(SERIAL_START, self.serial_output.writer().any()),
+            });
+        }
+
+        fn makeBusWithTwoMemoryDevices(self: *Self) !Bus(Tword) {
+            return try self.makeBus(&[_]BusDeviceCfg {
+                BusDeviceCfg.makeMemory(MEMORY_START, MEMORY_LENGTH),
+                BusDeviceCfg.makeMemory(MEMORY_START + MEMORY_LENGTH, MEMORY_LENGTH),
             });
         }
     };
 }
 
-fn run_read_write(Tword: type) !void {
+const to_write = [4]u8 { 0x69, 0x13, 0x37, 0x42 };
+
+fn test_read_write(Tword: type) !void {
     const Tenv = TestEnvironment(Tword);
     var env = try Tenv.init();
-    defer env.deinit();
-    var bus = try env.makeDefaultBus();
+    defer env.deinit() catch unreachable;
+    var bus = try env.makeBasicBus();
     defer bus.deinit(env.allocator);
 
-    const to_write = [4]u8{ 0x69, 0x13, 0x37, 0x42 };
     var readback: [to_write.len]u8 = undefined;
 
     try bus.readMemory(Tenv.MEMORY_START, &readback);
@@ -287,9 +302,32 @@ fn run_read_write(Tword: type) !void {
 }
 
 test "basic bus32 read/write" {
-    try run_read_write(u32);
+    try test_read_write(u32);
 }
 
 test "basic bus64 read/write" {
-    try run_read_write(u64);
+    try test_read_write(u64);
+}
+
+fn test_serial_device(Tword: type) !void {
+    const Tenv = TestEnvironment(Tword);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    var bus = try env.makeSerialBus();
+    defer bus.deinit(env.allocator);
+    for (to_write) |byte| {
+        try bus.writeMemory(Tenv.SERIAL_START, &[1]u8 { byte });
+    }
+    const result = try env.getSerial();
+    defer env.allocator.free(result);
+    try testing.expectEqualSlices(u8, result, &to_write);
+}
+
+test "bus32 serial device" {
+    try test_serial_device(u32);
+}
+
+test "bus64 serial device" {
+    try test_serial_device(u64);
+}
 }
