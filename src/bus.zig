@@ -66,7 +66,7 @@ fn BusDevice(comptime Tword: type) type {
 
         fn writeMemory(self: *Self, offset: Tword, src: []const u8) !void {
             const length: Tword = @intCast(src.len);
-            if (offset + length >= self.length) {
+            if (offset + length > self.length) {
                 return error.OutOfBounds;
             }
             switch (self.vtag) {
@@ -96,27 +96,6 @@ pub fn BusDeviceConfig(Tword: type) type {
             start: Tword,
             output_device: AnyWriter,
         },
-
-        // fn getLength(self: *Self) Tword {
-        //     switch (self) {
-        //         .memory => |*m| m.length,
-        //         .serial => 0x1000,
-        //     }
-        // }
-        //
-        // fn getStart(self: *Self) Tword {
-        //     return switch (self) {
-        //         .memory => |*m| m.length,
-        //         .serial => 0x10000000,
-        //     };
-        // }
-        //
-        // fn getMemoryRange(self: *Self) struct{Tword, Tword} {
-        //     return .{
-        //         self.getStart(),
-        //         self.getStart() + self.getLength()
-        //     };
-        // }
 
         pub fn makeMemory(address_start: Tword, length: Tword) Self {
             return .{ .memory = .{
@@ -330,4 +309,41 @@ test "bus32 serial device" {
 test "bus64 serial device" {
     try test_serial_device(u64);
 }
+
+fn test_write_end_of_device(Tword: type) !void {
+    const Tenv = TestEnvironment(Tword);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    var bus = try env.makeBasicBus();
+    defer bus.deinit(env.allocator);
+    try bus.writeMemory(Tenv.MEMORY_START + Tenv.MEMORY_LENGTH - to_write.len, &to_write);
+}
+
+test "bus32 write to end of device" {
+    try test_write_end_of_device(u32);
+}
+
+test "bus64 write to end of device" {
+    try test_write_end_of_device(u64);
+}
+
+fn test_write_across_devices(Tword: type) !void {
+    // For now, writes across devices should fail
+    const Tenv = TestEnvironment(Tword);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    var bus = try env.makeBusWithTwoMemoryDevices();
+    defer bus.deinit(env.allocator);
+    try testing.expectEqual(
+        bus.writeMemory(Tenv.MEMORY_START + Tenv.MEMORY_LENGTH - to_write.len + 1, &to_write),
+        error.OutOfBounds
+    );
+}
+
+test "bus32 write across devices" {
+    try test_write_across_devices(u32);
+}
+
+test "bus64 write across devices" {
+    try test_write_across_devices(u64);
 }
