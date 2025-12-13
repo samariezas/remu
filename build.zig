@@ -54,10 +54,26 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const root_tests_module = b.createModule(.{
+        .root_source_file = b.path("tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = buildRemuStep(b, root_module, use_llvm);
     b.installArtifact(exe);
 
     const check_step = b.step("check", "Check if remu compiles");
     const exe_check = buildRemuStep(b, root_module, false);
+    const tests = b.addTest(.{
+        .root_module = root_tests_module,
+        .use_llvm = false
+    });
+
     check_step.dependOn(&exe_check.step);
+    check_step.dependOn(&tests.step);
+
+    const test_step = b.step("test", "Run tests");
+    const run_tests = b.addRunArtifact(tests);
+    test_step.dependOn(&run_tests.step);
 }

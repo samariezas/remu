@@ -1,5 +1,8 @@
 const std = @import("std");
+const bus = @import("bus.zig");
 pub const cpu_config = @import("cpu_config.zig");
+const Bus = bus.Bus;
+const BusDeviceConfig = bus.BusDeviceConfig;
 const Allocator = std.mem.Allocator;
 const LittleEndian = std.builtin.Endian.little;
 
@@ -22,163 +25,6 @@ fn signExtend(comptime T: type, val: anytype) T {
     const signed: SignedOriginalType = @bitCast(val);  //bitcast to i12
     const signed_extended: SignedExtendedType = @intCast(signed); //extend to i32
     return @bitCast(signed_extended);                  //return u32
-}
-
-fn BusDevice(comptime Tword: type) type {
-    return struct {
-        start_address: Tword,
-        length: Tword,
-        vtag: union(enum) {
-            memory: struct {
-                allocator: Allocator,
-                data: []u8,
-            },
-            serial: struct {
-                writer: std.io.AnyWriter,
-            },
-        },
-
-        const Self = @This();
-
-        fn initMemory(allocator: Allocator, memory_start: Tword, memory_length: Tword) !Self {
-            const memory = try allocator.alloc(u8, memory_length);
-            @memset(memory, 0xa1); // TODO: hide under some "debug" flag
-            return .{
-                .start_address = memory_start,
-                .length = memory_length,
-                .vtag = .{ .memory = .{
-                    .allocator = allocator,
-                    .data = memory,
-                }},
-            };
-        }
-
-        fn initSerial(writer: std.io.AnyWriter) Self {
-            const retval = Self {
-                .start_address = 0x10000000,
-                .length = 0x1000,
-                .vtag = .{ .serial = .{
-                    .writer = writer,
-                }},
-            };
-            return retval;
-        }
-        
-        fn deinit(self: *Self) void {
-            switch (self.vtag) {
-                .memory => |*m| { m.*.allocator.free(m.*.data); },
-                .serial => { },
-            }
-        }
-
-        fn readMemory(self: *Self, offset: Tword, dest: []u8) !void {
-            const length: Tword = @intCast(dest.len);
-            if (offset + length >= self.length) {
-                return error.OutOfBounds;
-            }
-            switch (self.vtag) {
-                .memory => |*m| {
-                    const s_offset: usize = @intCast(offset);
-                    @memcpy(dest, m.data[s_offset..(s_offset+dest.len)]);
-                },
-                .serial => return error.CannotReadSerialBlock,
-            }
-        }
-
-        fn writeMemory(self: *Self, offset: Tword, src: []const u8) !void {
-            const length: Tword = @intCast(src.len);
-            if (offset + length >= self.length) {
-                return error.OutOfBounds;
-            }
-            switch (self.vtag) {
-                .memory => |*m| {
-                    const s_offset: usize = @intCast(offset);
-                    @memcpy(m.data[s_offset..(s_offset+src.len)], src);
-                },
-                .serial => |*s| {
-                    if (offset == 0) {
-                        const written = s.writer.write(&[_]u8{src[0]}) catch unreachable;
-                        std.debug.assert(written == 1);
-                    }
-                },
-            }
-        }
-    };
-}
-
-fn Bus(comptime Tword: type) type {
-    return struct {
-        devices: []BusDevice(Tword),
-
-        const Self = @This();
-
-        pub fn init(allocator: Allocator, memory_start: Tword, memory_length: Tword, serial_writer: std.io.AnyWriter) !Self {
-            var devices = try allocator.alloc(BusDevice(Tword), 2);
-            devices[0] = try BusDevice(Tword).initMemory(allocator, memory_start, memory_length);
-            devices[1] = BusDevice(Tword).initSerial(serial_writer);
-            return .{
-                .devices = devices,
-            };
-        }
-
-        fn deinit(self: *Self, allocator: Allocator) void {
-            for (self.devices) |*dev| {
-                dev.deinit();
-            }
-            allocator.free(self.devices);
-        }
-
-        fn getMemorySlice(self: *Self, address: Tword, length: Tword) ![]u8 {
-            if (address < self.memory_start) {
-                return error.OutOfBounds;
-            }
-            const start = address - self.memory_start;
-            const end = start + length;
-            if (end >= self.memory.len) {
-                return error.OutOfBounds;
-            }
-            return self.memory[start..end];
-        }
-
-        // TODO: do in a better way (i.e. allow reading from multiple devices for a single read)
-        fn findDevice(self: *Self, address: Tword) ?*BusDevice(Tword) {
-            for (self.devices) |*dev| {
-                if (address >= dev.start_address and address < dev.start_address + dev.length) {
-                    return dev;
-                }
-            }
-            return null;
-        }
-
-        fn readMemory(self: *Self, address: Tword, dest: []u8) !void {
-            if (self.findDevice(address)) |dev| {
-                try dev.readMemory(address - dev.start_address, dest);
-            } else {
-                return error.BusDeviceNotFound;
-            }
-        }
-
-        fn readWord(self: *Self, address: Tword) !Tword {
-            var bytes: [@sizeOf(Tword)]u8 = undefined;
-            try self.readMemory(address, &bytes);
-            return std.mem.readInt(Tword, &bytes, LittleEndian);
-        }
-
-        fn writeMemory(self: *Self, address: Tword, src: []const u8) !void {
-            // TODO: do in a better way
-            if (self.findDevice(address)) |dev| {
-                try dev.writeMemory(address - dev.start_address, src);
-            } else {
-                return error.BusDeviceNotFound;
-            }
-        }
-
-        fn writeWord(self: *Self, address: Tword, word: Tword) !void {
-            var bytes: [@sizeOf(Tword)]u8 = undefined;
-            std.mem.writeInt(Tword, &bytes, word, LittleEndian);
-            try self.writeMemory(address, &bytes);
-        }
-    };
 }
 
 const InstructionID = union(enum) {
@@ -1072,11 +918,17 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             tohost_address: Tword,
             serial_writer: std.io.AnyWriter,
         ) !RVCPU(opt) {
+            const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
+            const serial_device = BusDeviceConfig(Tword).makeSerial(0x10000000, serial_writer);
+            const cpu_bus = try Bus(Tword).init(allocator, &[_]BusDeviceConfig(Tword) {
+                memory_device,
+                serial_device,
+            });
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
                 .pc = entrypoint,
-                .bus = try Bus(Tword).init(allocator, memory_start, memory_length, serial_writer),
+                .bus = cpu_bus,
                 .test_result = null,
                 .writer = writer,
                 .signature_start = signature_start,

@@ -392,6 +392,7 @@ pub fn runSingle(
     debug_writer: ?std.io.AnyWriter,
 ) !RunDiscrepancy {
     const spike_result = try runSpike(allocator, opt.word_size, image);
+    errdefer spike_result.deinit(allocator);
     const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer);
     return RunDiscrepancy.init(allocator, spike_result, remu_result);
 }
