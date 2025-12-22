@@ -1,7 +1,16 @@
 const std = @import("std");
+const privilege = @import("privilege.zig");
 const Allocator = std.mem.Allocator;
 const LittleEndian = std.builtin.Endian.little;
 const AnyWriter = std.io.AnyWriter;
+const PrivilegeLevel = privilege.PrivilegeLevel;
+const SppPrivilegeLevel = privilege.SppPrivilegeLevel;
+
+const TranslationReason = enum {
+    Read,
+    Write,
+    Execute
+};
 
 fn BusDevice(comptime Tword: type) type {
     return struct {
@@ -205,6 +214,174 @@ pub fn Bus(Tword: type) type {
     };
 }
 
+pub fn Paging(Tword: type) type {
+    return struct {
+        const LEVELS: Tword = 3;
+        const PAGESIZE: Tword = 4096;
+        const VirtualAddress = packed struct {
+            const Self = @This();
+
+            page_offset: u12,
+            vpn0: u9,
+            vpn1: u9,
+            vpn2: u9,
+            padding: u25,
+
+            fn getVpn(self: *const Self, i: isize) Tword {
+                switch (i) {
+                    0 => return @intCast(self.vpn0),
+                    1 => return @intCast(self.vpn1),
+                    2 => return @intCast(self.vpn2),
+                    else => unreachable,
+                }
+            }
+        };
+
+        const PhysicalPPN = packed struct {
+            ppn0: u9,
+            ppn1: u9,
+            ppn2: u26,
+
+            fn getFull(self: PhysicalPPN) u44 {
+                return @bitCast(self);
+            }
+        };
+
+        const PhysicalAddress = packed struct {
+            const Self = @This();
+             
+            page_offset: u12,
+            ppn: PhysicalPPN,
+            padding: u8,
+
+            // fn getPpn(self: *const Self, i: isize) Tword {
+            //     switch (i) {
+            //         0 => return @bitCast(self.ppn0),
+            //         1 => return @bitCast(self.ppn1),
+            //         2 => return @bitCast(self.ppn2),
+            //         else => unreachable,
+            //     }
+            // }
+        };
+
+        const PageTableEntry = packed struct {
+            const Self = @This();
+
+            v: u1,
+            r: u1,
+            w: u1,
+            x: u1,
+            u: u1,
+            g: u1,
+            a: u1,
+            d: u1,
+            rsw: u2,
+            ppn: PhysicalPPN,
+            reserved: u7,
+            pbmt: u2,
+            n: u1,
+
+            // fn getPpn(self: *const Self, i: isize) Tword {
+            //     switch (i) {
+            //         0 => return @bitCast(self.ppn0),
+            //         1 => return @bitCast(self.ppn1),
+            //         2 => return @bitCast(self.ppn2),
+            //         else => unreachable,
+            //     }
+            // }
+
+            fn make(ppn: PhysicalPPN, r: bool, w: bool, x: bool) Self {
+                return .{
+                    .v = 1,
+                    .r = @intFromBool(r),
+                    .w = @intFromBool(w),
+                    .x = @intFromBool(x),
+                    .u = 0,
+                    .g = 0,
+                    .a = 0,
+                    .d = 0,
+                    .rsw = 0,
+                    .ppn = ppn,
+                    .reserved = 0,
+                    .pbmt = 0,
+                    .n = 0
+                };
+            }
+        };
+
+        fn translateAddress(
+            bus: *Bus(Tword),
+            va: VirtualAddress,
+            ppn: u44,
+            translation_reason: TranslationReason
+        ) !Tword {
+            var a: Tword = @as(Tword, ppn) * @as(Tword, PAGESIZE);
+            var i: isize = LEVELS - 1;
+            var pte: PageTableEntry = undefined;
+            var pa = std.mem.zeroes(PhysicalAddress);
+            while (true) {
+                var buffer: [@sizeOf(PageTableEntry)]u8 = undefined;
+                const address_to_read = a + va.getVpn(i) * @sizeOf(PageTableEntry);
+                std.debug.print("Reading from address {x}\n", .{address_to_read});
+                bus.readMemory(
+                    address_to_read,
+                    &buffer
+                ) catch return error.CannotReadPageTableEntry;
+                // TODO: should raise correct errors
+                // ) catch |err| {
+                    // switch (err) {
+                    //     error.OutOfBounds => unreachable,
+                    //     error.BusDeviceNotFound => unreachable,
+                    //     error.CannotReadSerialBlock => unreachable,
+                    // }
+                // };
+                pte = std.mem.littleToNative(PageTableEntry, @bitCast(buffer));
+                // TODO: check reserved bits in PTE
+                if (pte.v == 0 // pte is invalid
+                    or (pte.r == 0 and pte.w == 1)) // reserved for future use
+                {
+                    return error.InvalidPTE;
+                }
+                std.debug.print("Old a=0x{x}\n", .{a});
+                std.debug.print("Read PTE={any}\n", .{pte});
+                if (pte.r == 1 or pte.x == 1) {
+                    break;
+                }
+                i -= 1;
+                if (i < 0) return error.TranslationTooDeep;
+                a = pte.ppn.getFull() * PAGESIZE;
+                std.debug.print("New a=0x{x}\n", .{a});
+            }
+            std.debug.print("Ok, done translating i={any}\n", .{i});
+            std.debug.assert(i == 0);
+            // TODO: check for misaligned superpages
+            // if (i > 0 and (pte.getPpn(i) )
+            // TODO: handle priv levels
+            switch (translation_reason) {
+                .Read => {
+                    if (pte.r == 0) {
+                        return error.DisallowedOperation;
+                    }
+                },
+                .Write => {
+                    if (pte.w == 0) {
+                        return error.DisallowedOperation;
+                    }
+                },
+                .Execute => {
+                    if (pte.x == 0) {
+                        return error.DisallowedOperation;
+                    }
+                }
+            }
+            // TODO: step 9
+            pa.page_offset = va.page_offset;
+            pa.ppn = pte.ppn;
+            return @bitCast(pa);
+        }
+    };
+}
+
 const DebugAllocator = std.heap.DebugAllocator(.{});
 const testing = std.testing;
 fn TestEnvironment(Tword: type) type {
@@ -212,7 +389,7 @@ fn TestEnvironment(Tword: type) type {
         const Self = @This();
         const BusDeviceCfg = BusDeviceConfig(Tword);
 
-        pub const MEMORY_LENGTH: Tword = 0x4000;
+        pub const MEMORY_LENGTH: Tword = 0x1_0000;
         pub const MEMORY_START: Tword = 0x0800_0000;
         pub const SERIAL_START: Tword = 0x1000_0000;
 
@@ -346,4 +523,50 @@ test "bus32 write across devices" {
 
 test "bus64 write across devices" {
     try test_write_across_devices(u64);
+}
+
+test "bus64 translation" {
+    const Tenv = TestEnvironment(u64);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    const paging = Paging(u64);
+    var bus = try env.makeBasicBus();
+    defer bus.deinit(env.allocator);
+
+    const memory_shifted: u44 = Tenv.MEMORY_START >> 12;
+    const l0_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 1);
+    const l1_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 2);
+    const l2_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 0x15);
+
+    var l0_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l0_ppn, false, false, false));
+    var l1_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l1_ppn, false, false, false));
+    var l2_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l2_ppn, true, true, false));
+
+    const l0_bytes = std.mem.asBytes(&l0_pte);
+    const l1_bytes = std.mem.asBytes(&l1_pte);
+    const l2_bytes = std.mem.asBytes(&l2_pte);
+
+    const virtual_address = paging.VirtualAddress {
+        .page_offset = 0x123,
+        .vpn0 = 30,
+        .vpn1 = 20,
+        .vpn2 = 10,
+        .padding = 0,
+    };
+
+    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 10, l0_bytes);
+    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 20 + paging.PAGESIZE, l1_bytes);
+    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 30 + paging.PAGESIZE * 2, l2_bytes);
+
+    const translated_address = try paging.translateAddress(
+        &bus,
+        virtual_address,
+        memory_shifted,
+        TranslationReason.Read
+    );
+    std.debug.print("Translated address = {x}\n", .{translated_address});
+    try testing.expectEqual(
+        translated_address,
+        (0x8015 << 12) + 0x123
+    );
 }

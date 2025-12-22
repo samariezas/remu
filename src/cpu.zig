@@ -1,10 +1,13 @@
 const std = @import("std");
 const bus = @import("bus.zig");
+const privilege = @import("privilege.zig");
 pub const cpu_config = @import("cpu_config.zig");
 const Bus = bus.Bus;
 const BusDeviceConfig = bus.BusDeviceConfig;
 const Allocator = std.mem.Allocator;
 const LittleEndian = std.builtin.Endian.little;
+const PrivilegeLevel = privilege.PrivilegeLevel;
+const SppPrivilegeLevel = privilege.SppPrivilegeLevel;
 
 fn toSigned(comptime T: type) type {
     return std.meta.Int(.signed, @typeInfo(T).int.bits);
@@ -311,55 +314,6 @@ const TrapMode = enum {
             0 => return .Direct,
             else => return null,
         }
-    }
-};
-
-const PrivilegeLevel = enum {
-    User,
-    Supervisor,
-    Machine,
-
-    fn getEncoding(self: PrivilegeLevel) u2 {
-        switch (self) {
-            .User => return 0,
-            .Supervisor => return 1,
-            .Machine => return 3,
-        }
-    }
-
-    fn fromEncoding(encoding: u2) ?PrivilegeLevel {
-        switch (encoding) {
-            0 => return .User,
-            1 => return .Supervisor,
-            3 => return .Machine,
-            else => return null,
-        }
-    }
-};
-
-const SppPrivilegeLevel = enum {
-    User,
-    Supervisor,
-
-    fn getEncoding(self: SppPrivilegeLevel) u1 {
-        switch (self) {
-            .User => return 0,
-            .Supervisor => return 1,
-        }
-    }
-
-    fn fromEncoding(encoding: u1) SppPrivilegeLevel {
-        switch (encoding) {
-            0 => return .User,
-            1 => return .Supervisor,
-        }
-    }
-
-    fn toRegular(self: SppPrivilegeLevel) PrivilegeLevel {
-        return switch (self) {
-            .User => PrivilegeLevel.User,
-            .Supervisor => PrivilegeLevel.Supervisor,
-        };
     }
 };
 
