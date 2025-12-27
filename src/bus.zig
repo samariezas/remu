@@ -214,6 +214,20 @@ pub fn Bus(Tword: type) type {
     };
 }
 
+const MemoryTranslationPermissions = struct {
+    read: bool,
+    write: bool,
+    execute: bool,
+
+    fn makeEmpty() MemoryTranslationPermissions {
+        return .{
+            .read = false,
+            .write = false,
+            .execute = false,
+        };
+    }
+};
+
 pub fn Paging(Tword: type) type {
     return struct {
         const LEVELS: Tword = 3;
@@ -290,12 +304,12 @@ pub fn Paging(Tword: type) type {
             //     }
             // }
 
-            fn make(ppn: PhysicalPPN, r: bool, w: bool, x: bool) Self {
+            fn make(ppn: PhysicalPPN, permissions: MemoryTranslationPermissions) Self {
                 return .{
                     .v = 1,
-                    .r = @intFromBool(r),
-                    .w = @intFromBool(w),
-                    .x = @intFromBool(x),
+                    .r = @intFromBool(permissions.read),
+                    .w = @intFromBool(permissions.write),
+                    .x = @intFromBool(permissions.execute),
                     .u = 0,
                     .g = 0,
                     .a = 0,
@@ -322,7 +336,6 @@ pub fn Paging(Tword: type) type {
             while (true) {
                 var buffer: [@sizeOf(PageTableEntry)]u8 = undefined;
                 const address_to_read = a + va.getVpn(i) * @sizeOf(PageTableEntry);
-                std.debug.print("Reading from address {x}\n", .{address_to_read});
                 bus.readMemory(
                     address_to_read,
                     &buffer
@@ -342,17 +355,13 @@ pub fn Paging(Tword: type) type {
                 {
                     return error.InvalidPTE;
                 }
-                std.debug.print("Old a=0x{x}\n", .{a});
-                std.debug.print("Read PTE={any}\n", .{pte});
                 if (pte.r == 1 or pte.x == 1) {
                     break;
                 }
                 i -= 1;
                 if (i < 0) return error.TranslationTooDeep;
                 a = pte.ppn.getFull() * PAGESIZE;
-                std.debug.print("New a=0x{x}\n", .{a});
             }
-            std.debug.print("Ok, done translating i={any}\n", .{i});
             std.debug.assert(i == 0);
             // TODO: check for misaligned superpages
             // if (i > 0 and (pte.getPpn(i) )
@@ -525,8 +534,12 @@ test "bus64 write across devices" {
     try test_write_across_devices(u64);
 }
 
-test "bus64 translation" {
-    const Tenv = TestEnvironment(u64);
+fn basic_translation_test(
+    Tword: type,
+    reason: TranslationReason,
+    permissions: MemoryTranslationPermissions
+) !Tword {
+    const Tenv = TestEnvironment(Tword);
     var env = try Tenv.init();
     defer env.deinit() catch unreachable;
     const paging = Paging(u64);
@@ -538,9 +551,9 @@ test "bus64 translation" {
     const l1_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 2);
     const l2_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 0x15);
 
-    var l0_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l0_ppn, false, false, false));
-    var l1_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l1_ppn, false, false, false));
-    var l2_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l2_ppn, true, true, false));
+    var l0_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l0_ppn, MemoryTranslationPermissions.makeEmpty()));
+    var l1_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l1_ppn, MemoryTranslationPermissions.makeEmpty()));
+    var l2_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l2_ppn, permissions));
 
     const l0_bytes = std.mem.asBytes(&l0_pte);
     const l1_bytes = std.mem.asBytes(&l1_pte);
@@ -558,13 +571,70 @@ test "bus64 translation" {
     try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 20 + paging.PAGESIZE, l1_bytes);
     try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 30 + paging.PAGESIZE * 2, l2_bytes);
 
-    const translated_address = try paging.translateAddress(
+    return paging.translateAddress(
         &bus,
         virtual_address,
         memory_shifted,
-        TranslationReason.Read
+        reason
     );
-    std.debug.print("Translated address = {x}\n", .{translated_address});
+}
+
+test "bus64 translation" {
+    const expected_address: u64 = (0x8015 << 12) + 0x123;
+    const tests = [_]MemoryTranslationPermissions{
+        .{ .read = true, .write = true, .execute = true, },
+        .{ .read = true, .write = true, .execute = false, },
+        .{ .read = true, .write = false, .execute = true, },
+        .{ .read = true, .write = false, .execute = false, }
+    };
+    for (tests) |test_| {
+        const translated_address = basic_translation_test(
+            u64, .Read, test_
+        );
+        try testing.expectEqual(
+            expected_address,
+            translated_address
+        );
+    }
+}
+
+test "bus64 translation with incorrect permissions" {
+    for ([_]MemoryTranslationPermissions{
+        .{ .read = true, .write = false, .execute = true, },
+        .{ .read = true, .write = false, .execute = false, }
+    }) |test_| {
+        const translated_address = basic_translation_test(
+            u64, .Write, test_
+        );
+        try testing.expectEqual(
+            error.DisallowedOperation,
+            translated_address
+        );
+    }
+    for ([_]MemoryTranslationPermissions{
+        .{ .read = true, .write = true, .execute = false, },
+        .{ .read = true, .write = false, .execute = false, }
+    }) |test_| {
+        const translated_address = basic_translation_test(
+            u64, .Execute, test_
+        );
+        try testing.expectEqual(
+            error.DisallowedOperation,
+            translated_address
+        );
+    }
+}
+
+test "bus64 translation invalid PTE states" {
+    // TODO
+}
+
+test "bus64 translation wrong access type" {
+    const translated_address = basic_translation_test(
+        u64,
+        .Read,
+        .{ .read = true, .write = false, .execute = false, }
+    );
     try testing.expectEqual(
         translated_address,
         (0x8015 << 12) + 0x123
