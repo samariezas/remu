@@ -232,6 +232,7 @@ pub fn Paging(Tword: type) type {
     return struct {
         const LEVELS: Tword = 3;
         const PAGESIZE: Tword = 4096;
+        const PTESIZE: Tword = @sizeOf(Paging(Tword).PageTableEntry);
         const VirtualAddress = packed struct {
             const Self = @This();
 
@@ -258,6 +259,10 @@ pub fn Paging(Tword: type) type {
 
             fn getFull(self: PhysicalPPN) u44 {
                 return @bitCast(self);
+            }
+
+            fn fromInt(val: u44) PhysicalPPN {
+                return @bitCast(val);
             }
         };
 
@@ -320,6 +325,11 @@ pub fn Paging(Tword: type) type {
                     .pbmt = 0,
                     .n = 0
                 };
+            }
+
+            fn isValid(self: *Self) bool {
+                // TODO: do proper validity check
+                return self.r != 0 or self.w != 0 or self.x != 0;
             }
         };
 
@@ -534,6 +544,37 @@ test "bus64 write across devices" {
     try test_write_across_devices(u64);
 }
 
+fn mapPage(
+    bus: *Bus(u64),
+    permissions: MemoryTranslationPermissions,
+    satp: u64,
+    virtual_address: u64,
+    physical_addresses: []const Paging(u64).PhysicalPPN
+) !void {
+    const paging = Paging(u64);
+    const virt: paging.VirtualAddress = @bitCast(virtual_address);
+    std.debug.assert(virt.padding == 0);
+    var a = satp * paging.PAGESIZE;
+    for (physical_addresses, 0..) |phys, i| {
+        const final = physical_addresses.len <= (i + 1);
+        const j: isize = @as(isize, paging.LEVELS) - 1 - @as(isize, @bitCast(i));
+        const pte_address = a + virt.getVpn(j) * paging.PTESIZE;
+        a = phys.getFull() * paging.PAGESIZE;
+        var currently_written: paging.PageTableEntry = undefined;
+        try bus.readMemory(pte_address, std.mem.asBytes(&currently_written));
+        currently_written = std.mem.littleToNative(paging.PageTableEntry, currently_written);
+        if (currently_written.isValid()) {
+            return error.OverridingPaging;
+        }
+        const perm = if (final) permissions else MemoryTranslationPermissions.makeEmpty();
+        const new_pte = std.mem.nativeToLittle(
+            paging.PageTableEntry,
+            paging.PageTableEntry.make(phys, perm)
+        );
+        try bus.writeMemory(pte_address, std.mem.asBytes(std.mem.asBytes(&new_pte)));
+    }
+}
+
 fn basic_translation_test(
     Tword: type,
     reason: TranslationReason,
@@ -542,23 +583,11 @@ fn basic_translation_test(
     const Tenv = TestEnvironment(Tword);
     var env = try Tenv.init();
     defer env.deinit() catch unreachable;
-    const paging = Paging(u64);
+    const paging = Paging(Tword);
     var bus = try env.makeBasicBus();
     defer bus.deinit(env.allocator);
 
-    const memory_shifted: u44 = Tenv.MEMORY_START >> 12;
-    const l0_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 1);
-    const l1_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 2);
-    const l2_ppn: paging.PhysicalPPN = @bitCast(memory_shifted + 0x15);
-
-    var l0_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l0_ppn, MemoryTranslationPermissions.makeEmpty()));
-    var l1_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l1_ppn, MemoryTranslationPermissions.makeEmpty()));
-    var l2_pte = std.mem.nativeToLittle(paging.PageTableEntry, paging.PageTableEntry.make(l2_ppn, permissions));
-
-    const l0_bytes = std.mem.asBytes(&l0_pte);
-    const l1_bytes = std.mem.asBytes(&l1_pte);
-    const l2_bytes = std.mem.asBytes(&l2_pte);
-
+    const first_page: u44 = Tenv.MEMORY_START >> 12;
     const virtual_address = paging.VirtualAddress {
         .page_offset = 0x123,
         .vpn0 = 30,
@@ -567,14 +596,15 @@ fn basic_translation_test(
         .padding = 0,
     };
 
-    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 10, l0_bytes);
-    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 20 + paging.PAGESIZE, l1_bytes);
-    try bus.writeMemory(Tenv.MEMORY_START + @sizeOf(paging.PageTableEntry) * 30 + paging.PAGESIZE * 2, l2_bytes);
-
+    try mapPage(&bus, permissions, first_page, @bitCast(virtual_address), &[_]paging.PhysicalPPN {
+        paging.PhysicalPPN.fromInt(first_page + 1),
+        paging.PhysicalPPN.fromInt(first_page + 2),
+        paging.PhysicalPPN.fromInt(first_page + 0x15),
+    });
     return paging.translateAddress(
         &bus,
         virtual_address,
-        memory_shifted,
+        first_page,
         reason
     );
 }
@@ -632,11 +662,11 @@ test "bus64 translation invalid PTE states" {
 test "bus64 translation wrong access type" {
     const translated_address = basic_translation_test(
         u64,
-        .Read,
-        .{ .read = true, .write = false, .execute = false, }
+        .Write,
+        .{ .read = true, .write = false, .execute = true, }
     );
     try testing.expectEqual(
         translated_address,
-        (0x8015 << 12) + 0x123
+        error.DisallowedOperation
     );
 }
