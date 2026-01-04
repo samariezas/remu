@@ -242,13 +242,17 @@ pub fn Paging(Tword: type) type {
             vpn2: u9,
             padding: u25,
 
-            fn getVpn(self: *const Self, i: isize) Tword {
+            fn getVpnSmall(self: *const Self, i: usize) u9 {
                 switch (i) {
-                    0 => return @intCast(self.vpn0),
-                    1 => return @intCast(self.vpn1),
-                    2 => return @intCast(self.vpn2),
+                    0 => return self.vpn0,
+                    1 => return self.vpn1,
+                    2 => return self.vpn2,
                     else => unreachable,
                 }
+            }
+
+            fn getVpn(self: *const Self, i: usize) Tword {
+                return @intCast(self.getVpnSmall(i));
             }
         };
 
@@ -256,6 +260,23 @@ pub fn Paging(Tword: type) type {
             ppn0: u9,
             ppn1: u9,
             ppn2: u26,
+
+            fn setIdx(self: *PhysicalPPN, idx: usize, val: u9) void {
+                switch (idx) {
+                    0 => self.ppn0 = val,
+                    1 => self.ppn1 = val,
+                    else => unreachable,
+                }
+            }
+
+            fn getIdx(self: PhysicalPPN, i: usize) Tword {
+                switch (i) {
+                    0 => return @intCast(self.ppn0),
+                    1 => return @intCast(self.ppn1),
+                    2 => return @intCast(self.ppn2),
+                    else => unreachable,
+                }
+            }
 
             fn getFull(self: PhysicalPPN) u44 {
                 return @bitCast(self);
@@ -272,6 +293,10 @@ pub fn Paging(Tword: type) type {
             page_offset: u12,
             ppn: PhysicalPPN,
             padding: u8,
+
+            fn getFull(self: *const Self) u64 {
+                return @bitCast(self.*);
+            }
 
             // fn getPpn(self: *const Self, i: isize) Tword {
             //     switch (i) {
@@ -340,7 +365,7 @@ pub fn Paging(Tword: type) type {
             translation_reason: TranslationReason
         ) !Tword {
             var a: Tword = @as(Tword, ppn) * @as(Tword, PAGESIZE);
-            var i: isize = LEVELS - 1;
+            var i: usize = LEVELS - 1;
             var pte: PageTableEntry = undefined;
             var pa = std.mem.zeroes(PhysicalAddress);
             while (true) {
@@ -368,14 +393,10 @@ pub fn Paging(Tword: type) type {
                 if (pte.r == 1 or pte.x == 1) {
                     break;
                 }
+                if (i == 0) return error.TranslationTooDeep;
                 i -= 1;
-                if (i < 0) return error.TranslationTooDeep;
                 a = pte.ppn.getFull() * PAGESIZE;
             }
-            std.debug.assert(i == 0);
-            // TODO: check for misaligned superpages
-            // if (i > 0 and (pte.getPpn(i) )
-            // TODO: handle priv levels
             switch (translation_reason) {
                 .Read => {
                     if (pte.r == 0) {
@@ -393,9 +414,16 @@ pub fn Paging(Tword: type) type {
                     }
                 }
             }
+            // TODO: check for misaligned superpages
+            // TODO: handle priv levels
             // TODO: step 9
             pa.page_offset = va.page_offset;
-            pa.ppn = pte.ppn;
+            var new_ppn = pte.ppn;
+            for (0..i) |j| {
+                if (pte.ppn.getIdx(j) != 0) return error.MisalignedSuperpage;
+                new_ppn.setIdx(j, va.getVpnSmall(j));
+            }
+            pa.ppn = new_ppn;
             return @bitCast(pa);
         }
     };
@@ -557,8 +585,7 @@ fn mapPage(
     var a = satp * paging.PAGESIZE;
     for (physical_addresses, 0..) |phys, i| {
         const final = physical_addresses.len <= (i + 1);
-        const j: isize = @as(isize, paging.LEVELS) - 1 - @as(isize, @bitCast(i));
-        const pte_address = a + virt.getVpn(j) * paging.PTESIZE;
+        const pte_address = a + virt.getVpn(paging.LEVELS - 1 - i) * paging.PTESIZE;
         a = phys.getFull() * paging.PAGESIZE;
         var currently_written: paging.PageTableEntry = undefined;
         try bus.readMemory(pte_address, std.mem.asBytes(&currently_written));
@@ -668,5 +695,94 @@ test "bus64 translation wrong access type" {
     try testing.expectEqual(
         translated_address,
         error.DisallowedOperation
+    );
+}
+
+test "bus64 superpages" {
+    const Tword = u64;
+    const Tenv = TestEnvironment(Tword);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    const paging = Paging(Tword);
+    var bus = try env.makeBasicBus();
+    defer bus.deinit(env.allocator);
+
+    const first_page: u44 = Tenv.MEMORY_START >> 12;
+    const virtual_address = paging.VirtualAddress {
+        .page_offset = 0x123,
+        .vpn0 = 0x30,
+        .vpn1 = 0x20,
+        .vpn2 = 0x10,
+        .padding = 0,
+    };
+
+    const permissions = MemoryTranslationPermissions {
+        .read = true,
+        .execute = true,
+        .write = true,
+    };
+    try mapPage(&bus, permissions, first_page, @bitCast(virtual_address), &[_]paging.PhysicalPPN {
+        paging.PhysicalPPN.fromInt(first_page + 1),
+        paging.PhysicalPPN.fromInt(first_page + 0x400),
+    });
+    try testing.expectEqual(
+        paging.translateAddress(
+            &bus,
+            virtual_address,
+            first_page,
+            .Read
+        ),
+        ((first_page + 0x400) << 12) + 0x30123
+    );
+}
+
+test "bus64 superpages 2" {
+    const Tword = u64;
+    const Tenv = TestEnvironment(Tword);
+    var env = try Tenv.init();
+    defer env.deinit() catch unreachable;
+    const paging = Paging(Tword);
+    var bus = try env.makeBasicBus();
+    defer bus.deinit(env.allocator);
+
+    const first_page: u44 = Tenv.MEMORY_START >> 12;
+    const virtual_address = paging.VirtualAddress {
+        .page_offset = 0x123,
+        .vpn0 = 0x30,
+        .vpn1 = 0x20,
+        .vpn2 = 0x10,
+        .padding = 0,
+    };
+    const expected_phys_address = paging.PhysicalAddress {
+        .padding = 0,
+        .ppn = paging.PhysicalPPN {
+            .ppn0 = 0x30,
+            .ppn1 = 0x20,
+            .ppn2 = 0xdead,
+        },
+        .page_offset = 0x123,
+    };
+
+    const permissions = MemoryTranslationPermissions {
+        .read = true,
+        .execute = true,
+        .write = true,
+    };
+    try mapPage(&bus, permissions, first_page, @bitCast(virtual_address), &[_]paging.PhysicalPPN {
+        paging.PhysicalPPN {
+            .ppn0 = 0,
+            .ppn1 = 0,
+            .ppn2 = 0xdead
+        },
+    });
+    const resulting_address = paging.translateAddress(
+        &bus,
+        virtual_address,
+        first_page,
+        .Read
+    );
+    try testing.expectEqual(
+        expected_phys_address.getFull(),
+        resulting_address
     );
 }
