@@ -42,7 +42,7 @@ fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
     return struct {
         const Tcpu = RVCPU(opt);
         const Tword = Tcpu.Tword;
-        const InstructionHandler = *const fn (*Tcpu, u32) void;
+        const InstructionHandler = *const fn (*Tcpu, u32) ?ExecutionError(Tword);
         const WriterHandler = *const fn (std.io.AnyWriter, u32, Tword) anyerror!void;
 
         opcode: u7,
@@ -317,10 +317,74 @@ const TrapMode = enum {
     }
 };
 
+fn ExecutionError(Tword: type) type {
+    return union(enum) {
+        InstructionAddressMisalligned: Tword,
+        InstructionAccessFault: Tword,
+        IllegalInstruction,
+        Breakpoint: Tword,
+        LoadAddressMisaligned: Tword,
+        LoadAccessFault: Tword,
+        StoreAddressMisaligned: Tword,
+        StoreAccessFault: Tword,
+        EcallFromU,
+        EcallFromS,
+        EcallFromM,
+        InstructionPageFault: Tword,
+        LoadPageFault: Tword,
+        StorePageFault: Tword,
+        DoubleTrap,
+
+        fn getCode(self: ExecutionError(Tword)) Tword {
+            return switch (self) {
+                .InstructionAddressMisalligned => 0,
+                .InstructionAccessFault => 1,
+                .IllegalInstruction => 2,
+                .Breakpoint => 3,
+                .LoadAddressMisaligned => 4,
+                .LoadAccessFault => 5,
+                .StoreAddressMisaligned => 6,
+                .StoreAccessFault => 7,
+                .EcallFromU => 8,
+                .EcallFromS => 9,
+                .EcallFromM => 11,
+                .InstructionPageFault => 12,
+                .LoadPageFault => 13,
+                .StorePageFault => 15,
+                .DoubleTrap => 16,
+            };
+        }
+
+        fn getVal(self: ExecutionError(Tword)) ?Tword {
+            return switch (self) {
+                .IllegalInstruction,
+                .EcallFromU,
+                .EcallFromS,
+                .EcallFromM,
+                .DoubleTrap
+                    => null,
+
+                .InstructionAddressMisalligned,
+                .InstructionAccessFault,
+                .Breakpoint,
+                .LoadAddressMisaligned,
+                .LoadAccessFault,
+                .StoreAddressMisaligned,
+                .StoreAccessFault,
+                .InstructionPageFault,
+                .LoadPageFault,
+                .StorePageFault
+                    => |*v| v.*,
+            };
+        }
+    };
+}
+
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
     return struct {
         const Self = @This();
         pub const Tword = opt.getTword();
+        const TError = ExecutionError(Tword);
 
         allocator: Allocator,
         registers: [32]Tword,
@@ -339,8 +403,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         s_trap_mode: TrapMode,
         mepc: Tword,
         mcause: Tword,
+        mtval: Tword,
         sepc: Tword,
         scause: Tword,
+        stval: Tword,
         current_privilege_level: PrivilegeLevel,
         mpp: PrivilegeLevel,
         spp: SppPrivilegeLevel,
@@ -781,7 +847,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
-        pub fn tick(self: *Self) !void {
+        fn executeInstruction(self: *Self) !?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
             try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
@@ -794,7 +860,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     if (self.writer) |writer| {
                         try i.print(writer, instruction, self.pc);
                     }
-                    i.handler(self, instruction);
+                    const execution_error = i.handler(self, instruction);
+                    if (execution_error) |err| {
+                        return err;
+                    }
                     if (self.writer) |writer| {
                         try self.writeRegisters(writer, 4);
                     }
@@ -802,15 +871,25 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                         self.pc += 4;
                     }
                     try self.debugPrint("\n", .{});
-                    return;
+                    return null;
                 }
             }
-            self.trap(2);
+            return TError.IllegalInstruction;
         }
 
-        fn trap_to_mmode(self: *Self, cause: Tword) void {
+        pub fn tick(self: *Self) !void {
+            const execution_error = try self.executeInstruction();
+            if (execution_error) |err| {
+                self.trap(err);
+            }
+        }
+
+        fn trap_to_mmode(self: *Self, err: TError) void {
             self.mepc = self.pc;
-            self.mcause = cause;
+            self.mcause = err.getCode();
+            if (err.getVal()) |val| {
+                self.mtval = val;
+            }
             self.pc = self.m_trap_handler_address;
             self.mpie = self.mie;
             self.mie = false;
@@ -818,9 +897,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.current_privilege_level = .Machine;
         }
 
-        fn trap_to_smode(self: *Self, cause: Tword) void {
+        fn trap_to_smode(self: *Self, err: TError) void {
             self.sepc = self.pc;
-            self.scause = cause;
+            self.scause = err.getCode();
+            if (err.getVal()) |val| {
+                self.stval = val;
+            }
             self.pc = self.s_trap_handler_address;
             self.spie = self.sie;
             self.sie = false;
@@ -832,13 +914,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.current_privilege_level = .Supervisor;
         }
 
-        fn trap(self: *Self, cause: Tword) void {
-            const cause_small: u5 = @intCast(cause);
+        fn trap(self: *Self, err: TError) void {
+            const cause_small: u5 = @truncate(err.getCode());
             const do_delegation: bool = (self.medeleg >> cause_small) & 1 == 1;
             if (self.current_privilege_level != .Machine and do_delegation) {
-                self.trap_to_smode(cause);
+                self.trap_to_smode(err);
             } else {
-                self.trap_to_mmode(cause);
+                self.trap_to_mmode(err);
             }
         }
 
@@ -894,8 +976,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .s_trap_mode = .Direct,
                 .mepc = 0,
                 .mcause = 0,
+                .mtval = 0,
                 .sepc = 0,
                 .scause = 0,
+                .stval = 0,
                 .current_privilege_level = .Machine,
                 .mpp = .User,
                 .spp = .User,
@@ -966,65 +1050,72 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return false;
         }
 
-        fn handleAdd(self: *Self, instruction: u32) void {
+        fn handleAdd(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) +% self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleSub(self: *Self, instruction: u32) void {
+        fn handleSub(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) -% self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleXor(self: *Self, instruction: u32) void {
+        fn handleXor(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) ^ self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleOr(self: *Self, instruction: u32) void {
+        fn handleOr(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) | self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleAnd(self: *Self, instruction: u32) void {
+        fn handleAnd(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) & self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleSll(self: *Self, instruction: u32) void {
+        fn handleSll(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) << shift_len
             );
+            return null;
         }
 
-        fn handleSrl(self: *Self, instruction: u32) void {
+        fn handleSrl(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) >> shift_len
             );
+            return null;
         }
 
-        fn handleSra(self: *Self, instruction: u32) void {
+        fn handleSra(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: shiftLen() = @truncate(self.getRegister(parsed.rs2));
             const src_signed: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
@@ -1033,9 +1124,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 @bitCast(result_signed)
             );
+            return null;
         }
 
-        fn handleSlt(self: *Self, instruction: u32) void {
+        fn handleSlt(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const rs1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const rs2: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
@@ -1043,9 +1135,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (rs1 < rs2) 1 else 0
             );
+            return null;
         }
 
-        fn handleSltu(self: *Self, instruction: u32) void {
+        fn handleSltu(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const rs1 = self.getRegister(parsed.rs1);
             const rs2 = self.getRegister(parsed.rs2);
@@ -1053,69 +1146,77 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (rs1 < rs2) 1 else 0
             );
+            return null;
         }
 
-        fn handleAddi(self: *Self, instruction: u32) void {
+        fn handleAddi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_signed = signExtend(Tword, parsed.imm);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) +% imm_signed
             );
+            return null;
         }
 
-        fn handleXori(self: *Self, instruction: u32) void {
+        fn handleXori(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) ^ signExtend(Tword, parsed.imm)
             );
+            return null;
         }
 
-        fn handleOri(self: *Self, instruction: u32) void {
+        fn handleOri(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) | signExtend(Tword, parsed.imm)
             );
+            return null;
         }
 
-        fn handleAndi(self: *Self, instruction: u32) void {
+        fn handleAndi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) & signExtend(Tword, parsed.imm)
             );
+            return null;
         }
 
-        fn handleSlli(self: *Self, instruction: u32) void {
+        fn handleSlli(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt = @bitCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
                 (self.getRegister(parsed.rs1) << imm_split.shift_len)
             );
+            return null;
         }
 
-        fn handleSrli(self: *Self, instruction: u32) void {
+        fn handleSrli(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt = @bitCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
                 (self.getRegister(parsed.rs1) >> imm_split.shift_len)
             );
+            return null;
         }
 
-        fn handleSrai(self: *Self, instruction: u32) void {
+        fn handleSrai(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt = @bitCast(parsed.imm);
             const signed_src: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const shifted = signed_src >> imm_split.shift_len;
             const result: Tword = @bitCast(shifted);
             self.setRegister(parsed.rd, result);
+            return null;
         }
 
-        fn handleSlti(self: *Self, instruction: u32) void {
+        fn handleSlti(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const rs1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const imm: toSigned(Tword) = @bitCast(signExtend(Tword, parsed.imm));
@@ -1123,9 +1224,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (rs1 < imm) 1 else 0
             );
+            return null;
         }
 
-        fn handleSltiu(self: *Self, instruction: u32) void {
+        fn handleSltiu(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const rs1 = self.getRegister(parsed.rs1);
             const imm: Tword = @bitCast(signExtend(Tword, parsed.imm));
@@ -1133,9 +1235,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (rs1 < imm) 1 else 0
             );
+            return null;
         }
 
-        fn handleAddiw(self: *Self, instruction: u32) void {
+        fn handleAddiw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const added: Tword = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
             const truncated: u32 = @truncate(added);
@@ -1143,9 +1246,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, truncated)
             );
+            return null;
         }
 
-        fn handleSlliw(self: *Self, instruction: u32) void {
+        fn handleSlliw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt32 = @bitCast(parsed.imm);
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1153,9 +1257,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, truncated << imm_split.shift_len)
             );
+            return null;
         }
 
-        fn handleSrliw(self: *Self, instruction: u32) void {
+        fn handleSrliw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt32 = @bitCast(parsed.imm);
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1163,9 +1268,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, truncated >> imm_split.shift_len)
             );
+            return null;
         }
 
-        fn handleSraiw(self: *Self, instruction: u32) void {
+        fn handleSraiw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_split: Tshamt32 = @bitCast(parsed.imm);
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1176,9 +1282,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, result)
             );
+            return null;
         }
 
-        fn handleAddw(self: *Self, instruction: u32) void {
+        fn handleAddw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: u32 = @truncate(self.getRegister(parsed.rs1));
             const b: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1186,9 +1293,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, a +% b)
             );
+            return null;
         }
 
-        fn handleSubw(self: *Self, instruction: u32) void {
+        fn handleSubw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: u32 = @truncate(self.getRegister(parsed.rs1));
             const b: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1196,9 +1304,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, a -% b)
             );
+            return null;
         }
 
-        fn handleSllw(self: *Self, instruction: u32) void {
+        fn handleSllw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1206,9 +1315,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, truncated << shift_len)
             );
+            return null;
         }
 
-        fn handleSrlw(self: *Self, instruction: u32) void {
+        fn handleSrlw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1216,9 +1326,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, truncated >> shift_len)
             );
+            return null;
         }
 
-        fn handleSraw(self: *Self, instruction: u32) void {
+        fn handleSraw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const shift_len: u5 = @truncate(self.getRegister(parsed.rs2));
             const truncated: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1228,9 +1339,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, result_signed)
             );
+            return null;
         }
 
-        fn genericLoadHandler(self: *Self, T: type, instruction: u32, comptime sign_extend: bool) void {
+        fn genericLoadHandler(self: *Self, T: type, instruction: u32, comptime sign_extend: bool) ?TError {
             const bitcnt = @typeInfo(T).int.bits;
             const parsed: ITypeInstruction = @bitCast(instruction);
             const imm_extended = signExtend(Tword, parsed.imm);
@@ -1241,37 +1353,38 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             const read_memory: T = std.mem.readInt(T, &bytes_read, LittleEndian);
             const result: Tword = if (sign_extend) signExtend(Tword, read_memory) else @intCast(read_memory);
             self.setRegister(parsed.rd, result);
+            return null;
         }
 
-        fn handleLb(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u8, instruction, true);
+        fn handleLb(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u8, instruction, true);
         }
 
-        fn handleLh(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u16, instruction, true);
+        fn handleLh(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u16, instruction, true);
         }
 
-        fn handleLw(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u32, instruction, true);
+        fn handleLw(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u32, instruction, true);
         }
 
-        fn handleLd(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u64, instruction, true);
+        fn handleLd(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u64, instruction, true);
         }
 
-        fn handleLbu(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u8, instruction, false);
+        fn handleLbu(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u8, instruction, false);
         }
 
-        fn handleLhu(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u16, instruction, false);
+        fn handleLhu(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u16, instruction, false);
         }
 
-        fn handleLwu(self: *Self, instruction: u32) void {
-            self.genericLoadHandler(u32, instruction, false);
+        fn handleLwu(self: *Self, instruction: u32) ?TError {
+            return self.genericLoadHandler(u32, instruction, false);
         }
 
-        fn genericStoreHandler(self: *Self, T: type, instruction: u32) void {
+        fn genericStoreHandler(self: *Self, T: type, instruction: u32) ?TError {
             const bitcnt = @typeInfo(T).int.bits;
             const parsed: STypeInstruction = @bitCast(instruction);
             const imm_extended = signExtend(Tword, parsed.getImm());
@@ -1280,25 +1393,26 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             std.mem.writeInt(Tword, &to_write, self.getRegister(parsed.rs2), LittleEndian);
             // TODO: proper errors
             self.bus.writeMemory(address, to_write[0..(bitcnt/8)]) catch @panic("Cannot write");
+            return null;
         }
 
-        fn handleSb(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u8, instruction);
+        fn handleSb(self: *Self, instruction: u32) ?TError {
+            return self.genericStoreHandler(u8, instruction);
         }
 
-        fn handleSh(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u16, instruction);
+        fn handleSh(self: *Self, instruction: u32) ?TError {
+            return self.genericStoreHandler(u16, instruction);
         }
 
-        fn handleSw(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u32, instruction);
+        fn handleSw(self: *Self, instruction: u32) ?TError {
+            return self.genericStoreHandler(u32, instruction);
         }
 
-        fn handleSd(self: *Self, instruction: u32) void {
-            self.genericStoreHandler(u64, instruction);
+        fn handleSd(self: *Self, instruction: u32) ?TError {
+            return self.genericStoreHandler(u64, instruction);
         }
 
-        fn handleBeq(self: *Self, instruction: u32) void {
+        fn handleBeq(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) == self.getRegister(parsed.rs2)) {
@@ -1306,9 +1420,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc += 4;
             }
+            return null;
         }
 
-        fn handleBne(self: *Self, instruction: u32) void {
+        fn handleBne(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) != self.getRegister(parsed.rs2)) {
@@ -1316,9 +1431,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc += 4;
             }
+            return null;
         }
 
-        fn handleBlt(self: *Self, instruction: u32) void {
+        fn handleBlt(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
@@ -1328,9 +1444,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc +%= 4;
             }
+            return null;
         }
 
-        fn handleBge(self: *Self, instruction: u32) void {
+        fn handleBge(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             const reg1: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
@@ -1340,9 +1457,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc +%= 4;
             }
+            return null;
         }
 
-        fn handleBltu(self: *Self, instruction: u32) void {
+        fn handleBltu(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) < self.getRegister(parsed.rs2)) {
@@ -1350,9 +1468,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc +%= 4;
             }
+            return null;
         }
 
-        fn handleBgeu(self: *Self, instruction: u32) void {
+        fn handleBgeu(self: *Self, instruction: u32) ?TError {
             const parsed: BTypeInstruction = @bitCast(instruction);
             const imm = parsed.getImm(Tword);
             if (self.getRegister(parsed.rs1) >= self.getRegister(parsed.rs2)) {
@@ -1360,66 +1479,63 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.pc +%= 4;
             }
+            return null;
         }
 
-        fn handleJal(self: *Self, instruction: u32) void {
+        fn handleJal(self: *Self, instruction: u32) ?TError {
             const parsed: JTypeInstruction = @bitCast(instruction);
             self.setRegister(parsed.rd, self.pc + 4);
             const imm = parsed.getImm(Tword);
             self.pc +%= imm;
+            return null;
         }
 
-        fn handleJalr(self: *Self, instruction: u32) void {
+        fn handleJalr(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const new_pc = self.getRegister(parsed.rs1) +% signExtend(Tword, parsed.imm);
             self.setRegister(parsed.rd, self.pc + 4);
             self.pc = new_pc;
+            return null;
         }
 
-        fn handleLui(self: *Self, instruction: u32) void {
+        fn handleLui(self: *Self, instruction: u32) ?TError {
             const parsed: UTypeInstruction = @bitCast(instruction);
             const imm: u32 = @intCast(parsed.imm);
             self.setRegister(
                 parsed.rd,
                 signExtend(Tword, imm << 12),
             );
+            return null;
         }
 
-        fn handleAuipc(self: *Self, instruction: u32) void {
+        fn handleAuipc(self: *Self, instruction: u32) ?TError {
             const parsed: UTypeInstruction = @bitCast(instruction);
             const imm = @as(u32, parsed.imm) << 12;
             self.setRegister(
                 parsed.rd,
                 self.pc +% signExtend(Tword, imm),
             );
+            return null;
         }
 
-        // TODO: split out properly
-        fn handleEcall(self: *Self, instruction: u32) void {
-            if (instruction == 0x00000073) { // ECALL
-                // std.debug.assert(!self.isHalted());
-                // self.test_result = TestResult(Tword) {
-                //     .a0 = self.getRegister(10),
-                // };
-                switch (self.current_privilege_level) {
-                    .User => self.trap(8),
-                    .Supervisor => self.trap(9),
-                    .Machine => self.trap(11),
-                }
-            } else {
-                @panic("Unknown instruction");
-            }
+        fn handleEcall(self: *Self, _: u32) ?TError {
+            return switch (self.current_privilege_level) {
+                .User => TError.EcallFromU,
+                .Supervisor => TError.EcallFromS,
+                .Machine => TError.EcallFromM,
+            };
         }
 
-        fn handleMul(self: *Self, instruction: u32) void {
+        fn handleMul(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             self.setRegister(
                 parsed.rd,
                 self.getRegister(parsed.rs1) *% self.getRegister(parsed.rs2)
             );
+            return null;
         }
 
-        fn handleMulh(self: *Self, instruction: u32) void {
+        fn handleMulh(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const bit_count = @typeInfo(Tword).int.bits;
             const Tdoubleword = std.meta.Int(.signed, bit_count*2);
@@ -1430,9 +1546,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 @truncate(result_unsigned >> bit_count)
             );
+            return null;
         }
 
-        fn handleMulhsu(self: *Self, instruction: u32) void {
+        fn handleMulhsu(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const bit_count = @typeInfo(Tword).int.bits;
             const Tdoubleword = std.meta.Int(.unsigned, bit_count*2);
@@ -1448,9 +1565,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 @truncate(result_unsigned)
             );
+            return null;
         }
 
-        fn handleMulhu(self: *Self, instruction: u32) void {
+        fn handleMulhu(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const bit_count = @typeInfo(Tword).int.bits;
             const Tdoubleword = std.meta.Int(.unsigned, bit_count*2);
@@ -1461,9 +1579,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 result
             );
+            return null;
         }
 
-        fn handleDiv(self: *Self, instruction: u32) void {
+        fn handleDiv(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const b: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
@@ -1476,9 +1595,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 @bitCast(result)
             );
+            return null;
         }
         
-        fn handleDivu(self: *Self, instruction: u32) void {
+        fn handleDivu(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a = self.getRegister(parsed.rs1);
             const b = self.getRegister(parsed.rs2);
@@ -1486,9 +1606,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (b == 0) std.math.maxInt(Tword) else a / b
             );
+            return null;
         }
 
-        fn handleRem(self: *Self, instruction: u32) void {
+        fn handleRem(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs1));
             const b: toSigned(Tword) = @bitCast(self.getRegister(parsed.rs2));
@@ -1501,9 +1622,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 @bitCast(result)
             );
+            return null;
         }
 
-        fn handleRemu(self: *Self, instruction: u32) void {
+        fn handleRemu(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a = self.getRegister(parsed.rs1);
             const b = self.getRegister(parsed.rs2);
@@ -1511,9 +1633,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (b == 0) a else a % b
             );
+            return null;
         }
 
-        fn handleMulw(self: *Self, instruction: u32) void {
+        fn handleMulw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: u32 = @truncate(self.getRegister(parsed.rs1));
             const b: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1521,9 +1644,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, a *% b)
             );
+            return null;
         }
         
-        fn handleDivw(self: *Self, instruction: u32) void {
+        fn handleDivw(self: *Self, instruction: u32) ?TError {
             // TODO: refactor DIV and DIVW into one function, same for REM
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a_unsigned: u32 = @truncate(self.getRegister(parsed.rs1));
@@ -1539,9 +1663,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, result)
             );
+            return null;
         }
 
-        fn handleDivuw(self: *Self, instruction: u32) void {
+        fn handleDivuw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: u32 = @truncate(self.getRegister(parsed.rs1));
             const b: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1549,9 +1674,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 if (b == 0) std.math.maxInt(Tword) else signExtend(Tword, a / b)
             );
+            return null;
         }
 
-        fn handleRemw(self: *Self, instruction: u32) void {
+        fn handleRemw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a_unsigned: u32 = @truncate(self.getRegister(parsed.rs1));
             const b_unsigned: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1566,9 +1692,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, result)
             );
+            return null;
         }
 
-        fn handleRemuw(self: *Self, instruction: u32) void {
+        fn handleRemuw(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
             const a: u32 = @truncate(self.getRegister(parsed.rs1));
             const b: u32 = @truncate(self.getRegister(parsed.rs2));
@@ -1576,45 +1703,51 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 parsed.rd,
                 signExtend(Tword, if (b == 0) a else a % b)
             );
+            return null;
         }
 
         // TODO: check about the side-effects for these
-        fn handleCsrrw(self: *Self, instruction: u32) void {
+        // TODO: CSR permissions
+        fn handleCsrrw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
                 const old_csr = self.readCsr(parsed.imm).?;
                 self.setRegister(parsed.rd, old_csr);
             }
             std.debug.assert(self.writeCsr(parsed.imm, self.getRegister(parsed.rs1)));
+            return null;
         }
         
-        fn handleCsrr_debug(self: *Self, instruction: u32) void {
+        fn handleCsrr_debug(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
                 const csr = self.readCsr(parsed.imm).?;
                 self.setRegister(parsed.rd, csr);
             }
+            return null;
         }
 
-        fn handleCsrrs(self: *Self, instruction: u32) void {
+        fn handleCsrrs(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const mask = self.getRegister(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
             const new_csr = old_csr | mask;
             std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            return null;
         }
 
-        fn handleCsrrc(self: *Self, instruction: u32) void {
+        fn handleCsrrc(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const mask = self.getRegister(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
             const new_csr = old_csr & (~mask);
             std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            return null;
         }
 
-        fn handleCsrrwi(self: *Self, instruction: u32) void {
+        fn handleCsrrwi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
                 const old_csr = self.readCsr(parsed.imm).?;
@@ -1622,32 +1755,36 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
             const imm_extended: Tword = @intCast(parsed.rs1);
             std.debug.assert(self.writeCsr(parsed.imm, imm_extended));
+            return null;
         }
 
-        fn handleCsrrsi(self: *Self, instruction: u32) void {
+        fn handleCsrrsi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const mask: Tword = @intCast(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
             const new_csr = old_csr | mask;
             std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            return null;
         }
 
-        fn handleCsrrci(self: *Self, instruction: u32) void {
+        fn handleCsrrci(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             const mask: Tword = @intCast(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
             const new_csr = old_csr & (~mask);
             std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            return null;
         }
 
-        fn handleGetpriv(self: *Self, instruction: u32) void {
+        fn handleGetpriv(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             self.setRegister(parsed.rd, @intCast(self.current_privilege_level.getEncoding()));
+            return null;
         }
 
-        fn handleMret(self: *Self, _: u32) void {
+        fn handleMret(self: *Self, _: u32) ?TError {
             self.mie = self.mpie;
             self.pc = self.mepc;
             // TODO: what is mprv?
@@ -1657,9 +1794,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.current_privilege_level = self.mpp;
             self.mpie = true;
             self.mpp = .User;
+            return null;
         }
 
-        fn handleSret(self: *Self, _: u32) void {
+        fn handleSret(self: *Self, _: u32) ?TError {
             // self.bus.findSerial().?.*.print("DEBUG: Dropping to {any}\n", .{self.spp}) catch unreachable;
             self.sie = self.spie;
             self.pc = self.sepc;
@@ -1667,8 +1805,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.current_privilege_level = self.spp.toRegular();
             self.spie = true;
             self.spp = .User;
+            return null;
         }
 
-        fn handleNop(_: *Self, _: u32) void { }
+        fn handleNop(_: *Self, _: u32) ?TError {
+            return null;
+        }
     };
 }
