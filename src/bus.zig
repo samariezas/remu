@@ -12,6 +12,12 @@ const TranslationReason = enum {
     Execute
 };
 
+pub const BusError = error {
+    AlignmentFault,
+    AccessFault,
+    PageFault
+};
+
 fn BusDevice(comptime Tword: type) type {
     return struct {
         start_address: Tword,
@@ -59,24 +65,24 @@ fn BusDevice(comptime Tword: type) type {
             }
         }
 
-        fn readMemory(self: *Self, offset: Tword, dest: []u8) !void {
+        fn readMemory(self: *const Self, offset: Tword, dest: []u8) BusError!void {
             const length: Tword = @intCast(dest.len);
             if (offset + length >= self.length) {
-                return error.OutOfBounds;
+                return error.AlignmentFault;
             }
             switch (self.vtag) {
                 .memory => |*m| {
                     const s_offset: usize = @intCast(offset);
                     @memcpy(dest, m.data[s_offset..(s_offset+dest.len)]);
                 },
-                .serial => return error.CannotReadSerialBlock,
+                .serial => return error.AccessFault,
             }
         }
 
-        fn writeMemory(self: *Self, offset: Tword, src: []const u8) !void {
+        fn writeMemory(self: *Self, offset: Tword, src: []const u8) BusError!void {
             const length: Tword = @intCast(src.len);
             if (offset + length > self.length) {
-                return error.OutOfBounds;
+                return error.AlignmentFault;
             }
             switch (self.vtag) {
                 .memory => |*m| {
@@ -85,7 +91,7 @@ fn BusDevice(comptime Tword: type) type {
                 },
                 .serial => |*s| {
                     if (offset == 0) {
-                        const written = s.writer.write(&[_]u8{src[0]}) catch unreachable;
+                        const written = s.writer.write(&[_]u8{src[0]}) catch @panic("Serial device write failed");
                         std.debug.assert(written == 1);
                     }
                 },
@@ -161,20 +167,8 @@ pub fn Bus(Tword: type) type {
             allocator.free(self.devices);
         }
 
-        fn getMemorySlice(self: *Self, address: Tword, length: Tword) ![]u8 {
-            if (address < self.memory_start) {
-                return error.OutOfBounds;
-            }
-            const start = address - self.memory_start;
-            const end = start + length;
-            if (end >= self.memory.len) {
-                return error.OutOfBounds;
-            }
-            return self.memory[start..end];
-        }
-
         // TODO: do in a better way (i.e. allow reading from multiple devices for a single read)
-        fn findDevice(self: *Self, address: Tword) ?*BusDevice(Tword) {
+        fn findDevice(self: *const Self, address: Tword) ?*BusDevice(Tword) {
             for (self.devices) |*dev| {
                 if (address >= dev.start_address and address < dev.start_address + dev.length) {
                     return dev;
@@ -183,30 +177,30 @@ pub fn Bus(Tword: type) type {
             return null;
         }
 
-        pub fn readMemory(self: *Self, address: Tword, dest: []u8) !void {
+        pub fn readMemory(self: *const Self, address: Tword, dest: []u8) BusError!void {
             if (self.findDevice(address)) |dev| {
                 try dev.readMemory(address - dev.start_address, dest);
             } else {
-                return error.BusDeviceNotFound;
+                return error.AccessFault;
             }
         }
 
-        pub fn readWord(self: *Self, address: Tword) !Tword {
+        pub fn readWord(self: *Self, address: Tword) BusError!Tword {
             var bytes: [@sizeOf(Tword)]u8 = undefined;
             try self.readMemory(address, &bytes);
             return std.mem.readInt(Tword, &bytes, LittleEndian);
         }
 
-        pub fn writeMemory(self: *Self, address: Tword, src: []const u8) !void {
+        pub fn writeMemory(self: *Self, address: Tword, src: []const u8) BusError!void {
             // TODO: do in a better way
             if (self.findDevice(address)) |dev| {
                 try dev.writeMemory(address - dev.start_address, src);
             } else {
-                return error.BusDeviceNotFound;
+                return error.AccessFault;
             }
         }
 
-        fn writeWord(self: *Self, address: Tword, word: Tword) !void {
+        fn writeWord(self: *Self, address: Tword, word: Tword) BusError!void {
             var bytes: [@sizeOf(Tword)]u8 = undefined;
             std.mem.writeInt(Tword, &bytes, word, LittleEndian);
             try self.writeMemory(address, &bytes);
@@ -560,7 +554,7 @@ fn test_write_across_devices(Tword: type) !void {
     defer bus.deinit(env.allocator);
     try testing.expectEqual(
         bus.writeMemory(Tenv.MEMORY_START + Tenv.MEMORY_LENGTH - to_write.len + 1, &to_write),
-        error.OutOfBounds
+        error.AlignmentFault
     );
 }
 

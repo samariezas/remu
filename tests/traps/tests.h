@@ -55,11 +55,13 @@ static uint64_t get_csr_no_privcheck(uint32_t csr) {
     X_CSR(mepc, 0x341) \
     X_CSR(mcause, 0x342) \
     X_CSR(mstatus, 0x300) \
+    X_CSR(mtval, 0x343) \
     X_CSR(stvec, 0x105) \
     X_CSR(sepc, 0x141) \
     X_CSR(scause, 0x142) \
     X_CSR(sstatus, 0x100) \
-    X_CSR(medeleg, 0x302)
+    X_CSR(medeleg, 0x302) \
+    X_CSR(stval, 0x143)
 
 #define X_CSR(name, id) static uint64_t get_ ## name ## _no_privcheck(void) \
     { return get_csr_no_privcheck((id)); }

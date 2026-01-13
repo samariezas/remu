@@ -4,7 +4,7 @@
 
 /* Steps */
 void test_illegal_instruction(void) {
-    asm volatile (".word 0x69420");
+    asm volatile (".word 0xffffffff");
 }
 
 /* Dropping/raising privilege levels */
@@ -90,6 +90,16 @@ void delegate_traps(void) {
     );
 }
 
+void write_bad_memory(void) {
+    int *address = (int*)0x100;
+    *address = 69;
+}
+
+void read_bad_memory(void) {
+    int *address = (int*)0x100;
+    write_tohost(*address);
+}
+
 typedef struct {
     const char *name;
     step_function_t fn;
@@ -114,6 +124,8 @@ static step_t steps[] = {
     MAKE_STEP(drop_from_supervisor,             PRIV_SUPERVISOR, true),
     MAKE_STEP(ecall,                            PRIV_USER,       true),
     MAKE_STEP(ecall,                            PRIV_SUPERVISOR, true),
+    MAKE_STEP(write_bad_memory,                 PRIV_SUPERVISOR, true),
+    MAKE_STEP(read_bad_memory,                  PRIV_MACHINE,    true),
 };
 
 static volatile bool should_trap = false;
