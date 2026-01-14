@@ -35,6 +35,7 @@ const InstructionID = union(enum) {
     funct_3: struct { funct3: u3 },
     funct_3_7: struct { funct3: u3, funct7: u7 },
     funct_3_6: struct { funct3: u3, funct6: u6 },
+    funct_3_5: struct { funct3: u3, funct5: u5 },
     direct_match: u32,
 };
 
@@ -109,6 +110,17 @@ fn InstructionDescriptor(comptime opt: cpu_config.CpuOptions) type {
             };
         }
 
+        fn makeF35(name: []const u8, opcode: u7, funct3: u3, funct5: u5, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
+            return .{
+                .opcode = opcode,
+                .id = InstructionID { .funct_3_5 = .{ .funct3 = funct3, .funct5 = funct5 } },
+                .handler = handler,
+                .name = name,
+                .advance_pc = true,
+                .writer_fn = writer_fn,
+            };
+        }
+
         fn makeDirect(name: []const u8, instruction: u32, handler: InstructionHandler, writer_fn: ?WriterHandler) Self {
             return .{
                 .opcode = instruction & 0x7f,
@@ -172,6 +184,20 @@ const ITypeInstruction = packed struct {
                 const decoded: ITypeInstruction = @bitCast(instruction);
                 const signed: i12 = @bitCast(decoded.imm);
                 try writer.print("x{}, {}(x{})", .{decoded.rd, signed, decoded.rs1});
+            }
+        };
+    }
+
+    fn makeCsrWriter(Tword: type) type {
+        return struct {
+            fn write(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: ITypeInstruction = @bitCast(instruction);
+                try writer.print("x{}, 0x{x}, x{}", .{decoded.rd, decoded.imm, decoded.rs1});
+            }
+
+            fn writeImm(writer: std.io.AnyWriter, instruction: u32, _: Tword) anyerror!void {
+                const decoded: ITypeInstruction = @bitCast(instruction);
+                try writer.print("x{}, 0x{x}, 0x{x}", .{decoded.rd, decoded.imm, decoded.rs1});
             }
         };
     }
@@ -383,6 +409,12 @@ fn ExecutionError(Tword: type) type {
 const DebugPrintError = error { WriteFailed };
 
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
+    const SignatureInfo = struct {
+        signature_start: opt.getTword(),
+        signature_end: opt.getTword(),
+        tohost_address: opt.getTword()
+    };
+
     return struct {
         const Self = @This();
         pub const Tword = opt.getTword();
@@ -395,9 +427,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         test_result: ?TestResult(Tword),
         writer: ?std.io.AnyWriter,
         // TODO: refactor everything used for testing (signatures, tohost, results)
-        signature_start: Tword,
-        signature_end: Tword,
-        tohost_address: Tword,
+        signature_info: ?SignatureInfo,
 
         m_trap_handler_address: Tword,
         m_trap_mode: TrapMode,
@@ -418,6 +448,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         spie: bool,
         
         medeleg: Tword,
+        mscratch: Tword,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -450,6 +481,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         const BWriter = BTypeInstruction.makeWriter(Tword).write;
         const UWriter = UTypeInstruction.makeWriter(Tword).write;
         const JWriter = JTypeInstruction.makeWriter(Tword).write;
+
+        const CSRWriter = ITypeInstruction.makeCsrWriter(Tword).write;
+        const CSRIWriter = ITypeInstruction.makeCsrWriter(Tword).writeImm;
 
         const instructions = [_]Instr {
             // R-type arithmetic/logic
@@ -548,19 +582,22 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 Instr.makeF37("REMUW", 0b0111011, 7, 1,    handleRemuw, RWriter),
             } else [_]Instr {}) ++
             (if (opt.privileged) [_]Instr {
-		Instr.makeF3("CSRRW", 0b1110011, 1,  handleCsrrw, null),
-		Instr.makeF3("CSRRS", 0b1110011, 2,  handleCsrrs, null),
-		Instr.makeF3("CSRRC", 0b1110011, 3,  handleCsrrc, null),
-		Instr.makeF3("CSRRWI", 0b1110011, 5, handleCsrrwi, null),
-		Instr.makeF3("CSRRSI", 0b1110011, 6, handleCsrrsi, null),
-		Instr.makeF3("CSRRCI", 0b1110011, 7, handleCsrrci, null),
-		Instr.makeF3("CSRR_DEBUG", 0b1110011, 4, handleCsrr_debug, null),
+                Instr.makeF3("CSRRW", 0b1110011, 1,  handleCsrrw, CSRWriter),
+                Instr.makeF3("CSRRS", 0b1110011, 2,  handleCsrrs, CSRWriter),
+                Instr.makeF3("CSRRC", 0b1110011, 3,  handleCsrrc, CSRWriter),
+                Instr.makeF3("CSRRWI", 0b1110011, 5, handleCsrrwi, CSRIWriter),
+                Instr.makeF3("CSRRSI", 0b1110011, 6, handleCsrrsi, CSRIWriter),
+                Instr.makeF3("CSRRCI", 0b1110011, 7, handleCsrrci, CSRIWriter),
+                Instr.makeF3("CSRR_DEBUG", 0b1110011, 4, handleCsrr_debug, null),
+                
+                // TODO: do properly
+                Instr.makeDirect("WFI", 0x10500073, handleNop, null),
 
                 // TODO: hide under some "debug" flag
                 Instr.makeF37("GETPRIV", 0b0001011, 0, 0x78, handleGetpriv, null),
 
-		Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
-		Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
+                Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
+                Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
             } else [_]Instr {});
 
         const Tcsrid: type = u12;
@@ -569,10 +606,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         const CsrMapEntry = struct {
             name: []const u8,
             id: Tcsrid,
-            write_handler: CsrWriteHandler,
+            write_handler: ?CsrWriteHandler,
             read_handler: CsrReadHandler,
 
-            fn new(name: []const u8, id: Tcsrid, write_handler: CsrWriteHandler, read_handler: CsrReadHandler) CsrMapEntry {
+            fn new(name: []const u8, id: Tcsrid, write_handler: ?CsrWriteHandler, read_handler: CsrReadHandler) CsrMapEntry {
                 return .{
                     .name = name,
                     .id = id,
@@ -793,6 +830,18 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value & 0xfcb7ff; }
         fn handleReadMedeleg(cpu: *Self) Tword { return cpu.medeleg; }
 
+        fn handleWriteMscratch(cpu: *Self, value: Tword) void { cpu.mscratch = value; }
+        fn handleReadMscratch(cpu: *Self) Tword { return cpu.mscratch; }
+
+        fn handleReadMhartid(_: *Self) Tword { return 0; }
+        fn handleWriteStub(cpu: *Self, _: Tword) void {
+            cpu.debugPrint("W: Using write stub\n", .{}) catch @panic("Failed debug print");
+        }
+        fn handleReadStub(cpu: *Self) Tword {
+            cpu.debugPrint("W: Using read stub\n", .{}) catch @panic("Failed debug print");
+            return 0;
+        }
+
         const csr_map = [_]CsrMapEntry{
             CsrMapEntry.new("mtvec",   0x305, TrapVectorCSR.handleWriteM,   TrapVectorCSR.handleReadM),
             CsrMapEntry.new("mepc",    0x341, handleWriteMepc,              handleReadMepc),
@@ -806,7 +855,17 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("sstatus", 0x100, SStatusCSR.handleWrite,       SStatusCSR.handleRead),
             CsrMapEntry.new("stval",   0x143, handleWriteStval,             handleReadStval),
 
-            CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,     handleReadMedeleg),
+            CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,           handleReadMedeleg),
+            CsrMapEntry.new("mscratch",0x340, handleWriteMscratch,          handleReadMscratch),
+
+            // TODO: replace with non-stubs
+            CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadMhartid),
+            CsrMapEntry.new("pmpcfg0", 0x3a0, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("pmpaddr0",0x3b0, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("mie",     0x304, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("mideleg", 0x303, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("mnstatus",0x744, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("satp",    0x180, handleWriteStub,             handleReadStub),
         };
 
         fn debugPrint(self: *Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
@@ -834,6 +893,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .funct_3 => |*v| return v.funct3 == id.funct3,
                 .funct_3_7 => |*v| return v.funct3 == id.funct3 and v.funct7 == id.funct7,
                 .funct_3_6 => |*v| return v.funct3 == id.funct3 and v.funct6 == (id.funct7 >> 1),
+                .funct_3_5 => |*v| return v.funct3 == id.funct3 and v.funct5 == (id.funct7 >> 2),
                 .direct_match => |*v| {
                     const original: u32 = @bitCast(id);
                     return original == v.*;
@@ -892,6 +952,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pub fn tick(self: *Self) DebugPrintError!void {
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
+                std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
                 self.trap(err);
             }
         }
@@ -965,9 +1026,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             memory_start: Tword,
             memory_length: Tword,
             writer: ?std.io.AnyWriter,
-            signature_start: Tword,
-            signature_end: Tword,
-            tohost_address: Tword,
+            signature_info: ?SignatureInfo,
             serial_writer: std.io.AnyWriter,
         ) !RVCPU(opt) {
             const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
@@ -983,9 +1042,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .bus = cpu_bus,
                 .test_result = null,
                 .writer = writer,
-                .signature_start = signature_start,
-                .signature_end = signature_end,
-                .tohost_address = tohost_address,
+                .signature_info = signature_info,
                 .m_trap_handler_address = 0,
                 .m_trap_mode = .Direct,
                 .s_trap_handler_address = 0,
@@ -1004,6 +1061,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .mpie = false,
                 .spie = false,
                 .medeleg = 0,
+                .mscratch = 0,
             };
         }
 
@@ -1012,11 +1070,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn isHalted(self: *Self) bool {
-            const word = self.bus.readWord(self.tohost_address) catch unreachable;
-            if (word > 0) {
-                self.test_result = TestResult(Tword) {
-                    .a0 = word >> 1,
-                };
+            if (self.signature_info) |signature_info| {
+                const word = self.bus.readWord(signature_info.tohost_address) catch unreachable;
+                if (word > 0) {
+                    self.test_result = TestResult(Tword) {
+                        .a0 = word >> 1,
+                    };
+                }
             }
             return self.test_result != null;
         }
@@ -1032,10 +1092,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         pub fn getSignature(self: *Self, allocator: Allocator) ![]u8 {
             std.debug.assert(self.isHalted());
-            const signature_length = self.signature_end - self.signature_start;
-            const buffer: []u8 = try allocator.alloc(u8, @intCast(signature_length));
-            try self.bus.readMemory(self.signature_start, buffer);
-            return buffer;
+            if (self.signature_info) |signature_info| {
+                const signature_length = signature_info.signature_end - signature_info.signature_start;
+                const buffer: []u8 = try allocator.alloc(u8, @intCast(signature_length));
+                try self.bus.readMemory(signature_info.signature_start, buffer);
+                return buffer;
+            } else {
+                return try allocator.alloc(u8, 0);
+            }
         }
 
         pub fn signatureNeeded(self: *Self) bool {
@@ -1058,12 +1122,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
-        fn writeCsr(self: *Self, id: Tcsrid, value: Tword) bool {
+        fn writeCsr(self: *Self, id: Tcsrid, value: Tword) ?TError {
             if (findCsr(id)) |csr| {
-                csr.write_handler(self, value);
-                return true;
+                if (csr.write_handler) |handler| {
+                    handler(self, value);
+                    return null;
+                }
             }
-            return false;
+            // TODO: maybe do the proper?
+            return TError { .IllegalInstruction = 0, };
         }
 
         fn handleAdd(self: *Self, instruction: u32) ?TError {
@@ -1730,14 +1797,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         // TODO: check about the side-effects for these
         // TODO: CSR permissions
+        // TODO: faults on unknown CSRs
         fn handleCsrrw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
                 const old_csr = self.readCsr(parsed.imm).?;
                 self.setRegister(parsed.rd, old_csr);
             }
-            std.debug.assert(self.writeCsr(parsed.imm, self.getRegister(parsed.rs1)));
-            return null;
+            return self.writeCsr(parsed.imm, self.getRegister(parsed.rs1));
         }
         
         fn handleCsrr_debug(self: *Self, instruction: u32) ?TError {
@@ -1751,21 +1818,25 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleCsrrs(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const mask = self.getRegister(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
-            const new_csr = old_csr | mask;
-            std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            if (parsed.rs1 != 0) {
+                const mask = self.getRegister(parsed.rs1);
+                const new_csr = old_csr | mask;
+                return self.writeCsr(parsed.imm, new_csr);
+            }
             return null;
         }
 
         fn handleCsrrc(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const mask = self.getRegister(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
-            const new_csr = old_csr & (~mask);
-            std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            if (parsed.rs1 != 0) {
+                const mask = self.getRegister(parsed.rs1);
+                const new_csr = old_csr & (~mask);
+                return self.writeCsr(parsed.imm, new_csr);
+            }
             return null;
         }
 
@@ -1776,27 +1847,30 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 self.setRegister(parsed.rd, old_csr);
             }
             const imm_extended: Tword = @intCast(parsed.rs1);
-            std.debug.assert(self.writeCsr(parsed.imm, imm_extended));
-            return null;
+            return self.writeCsr(parsed.imm, imm_extended);
         }
 
         fn handleCsrrsi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const mask: Tword = @intCast(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
-            const new_csr = old_csr | mask;
-            std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            if (parsed.rs1 != 0) {
+                const mask: Tword = @intCast(parsed.rs1);
+                const new_csr = old_csr | mask;
+                return self.writeCsr(parsed.imm, new_csr);
+            }
             return null;
         }
 
         fn handleCsrrci(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const mask: Tword = @intCast(parsed.rs1);
             const old_csr = self.readCsr(parsed.imm).?;
             self.setRegister(parsed.rd, old_csr);
-            const new_csr = old_csr & (~mask);
-            std.debug.assert(self.writeCsr(parsed.imm, new_csr));
+            if (parsed.rs1 != 0) {
+                const mask: Tword = @intCast(parsed.rs1);
+                const new_csr = old_csr & (~mask);
+                return self.writeCsr(parsed.imm, new_csr);
+            }
             return null;
         }
 
@@ -1820,7 +1894,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleSret(self: *Self, _: u32) ?TError {
-            // self.bus.findSerial().?.*.print("DEBUG: Dropping to {any}\n", .{self.spp}) catch unreachable;
             self.sie = self.spie;
             self.pc = self.sepc;
             // TODO: is there sprv, like mprv?

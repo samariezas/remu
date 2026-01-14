@@ -79,6 +79,12 @@ pub fn SymbolIt(comptime c: anytype) type {
                 section = c.elf_nextscn(elf, section);
                 if (section == null) { break; }
                 const header = c.elf_getshdr(section);
+                if (header == null) {
+                    const errno = c.elf_errno();
+                    const err_msg = c.elf_errmsg(errno);
+                    std.debug.print("Elf error: {} {s}\n", .{errno, err_msg});
+                    @panic("Elf error encountered");
+                }
                 if (header.*.sh_type == c.SHT_SYMTAB) {
                     symtab_section_count += 1;
                     const count = header.*.sh_size / header.*.sh_entsize;

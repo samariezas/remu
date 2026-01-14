@@ -21,6 +21,8 @@ pub fn LibElfInterface(comptime wordsize: WordSize) type {
 
         Elf: type,
         Elf_Scn: type,
+        elf_errno: @TypeOf(c.elf_errno),
+        elf_errmsg: @TypeOf(c.elf_errmsg),
         elf_begin: @TypeOf(c.elf_begin),
         elf_end: @TypeOf(c.elf_end),
         elf_getdata: @TypeOf(c.elf_getdata),
@@ -55,6 +57,8 @@ pub fn LibElf(comptime wordsize: WordSize) LibElfInterface(wordsize) {
 
         .Elf = c.Elf,
         .Elf_Scn = c.Elf_Scn,
+        .elf_errno = c.elf_errno,
+        .elf_errmsg = c.elf_errmsg,
         .elf_begin = c.elf_begin,
         .elf_end = c.elf_end,
         .elf_getdata = c.elf_getdata,

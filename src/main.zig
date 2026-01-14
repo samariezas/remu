@@ -9,23 +9,6 @@ const posix = std.posix;
 const process = std.process;
 const Allocator = std.mem.Allocator;
 
-const base32 = CpuOptions.makeBase(WordSize.w32);
-const base64 = CpuOptions.makeBase(WordSize.w64);
-
-const priv64 = base64.withM().withPrivileged();
-
-fn printBinary(data: []const u8, offset: u64) void {
-    var i: usize = 0;
-    while (i < data.len) {
-        if (i % 0x10 == 0) {
-            std.debug.print("\n{x:0>8} ", .{ offset + i });
-        }
-        std.debug.print("{x:0>2}", .{ data[i] });
-        if (i % 4 == 3) { std.debug.print(" ", .{}); }
-        i += 1;
-    }
-}
-
 pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -33,7 +16,7 @@ pub fn main() !u8 {
     var buffered_writer = std.io.bufferedWriter(raw_stdout_writer);
     const stdout_writer = buffered_writer.writer().any();
     defer {
-        buffered_writer.flush() catch unreachable;
+        buffered_writer.flush() catch @panic("Cannot flush stdout");
         const deinit_status = gpa.deinit();
         if (deinit_status == .leak) {
             @panic("memory leak detected");
@@ -41,26 +24,34 @@ pub fn main() !u8 {
     }
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
+    const arena_allocator = arena.allocator();
     var args = std.process.args();
     std.debug.assert(args.skip());
     const run_type = args.next() orelse @panic("Missing run type argument");
     if (std.mem.eql(u8, run_type, "remu")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        const result = try tests.runRemuAndCollectSerial(priv64, allocator, image, null);
+        const result = try tests.runRemuAndCollectSerial(tests.full64, allocator, image, stdout_writer);
         defer result.deinit(allocator);
-        try stdout_writer.print("Signature: {s}\n", .{result.signature});
+        try stdout_writer.print("Signature: {s}\n",
+            .{std.fmt.fmtSliceHexLower(result.signature)});
         try stdout_writer.print("Serial output:\n--------\n{s}--------\n",
             .{result.serial_output});
         try stdout_writer.print("Exit code: {any}\n", .{result.failure_code});
-        if (result.failure_code) |exit_code| {
-            std.debug.assert(exit_code != 0 and exit_code < 256);
-            return @truncate(exit_code);
+        if (result.failure_code) |_| {
+            return 1;
         }
+    } else if (std.mem.eql(u8, run_type, "binary")) {
+        const image = args.next() orelse @panic("Missing image argument");
+        std.debug.assert(!args.skip());
+        const result = try tests.runRemuBinary(
+            tests.full64, allocator, image, null, stdout_writer
+        );
+        defer result.deinit(allocator);
     } else if (std.mem.eql(u8, run_type, "single")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        const result = try tests.runSingle(priv64, allocator, image, null);
+        const result = try tests.runSingle(tests.full64, allocator, image, null);
         defer result.deinit(allocator);
         switch (result) {
             .Discrepancy => |d| {
@@ -86,18 +77,18 @@ pub fn main() !u8 {
                     .{d.serial_output});
             },
         }
-    // } else if (std.mem.eql(u8, run_type, "multi")) {
-    //     const start = args.next() orelse @panic("Missing start of name argument");
-    //     const path = args.next() orelse @panic("Missing path argument");
-    //     std.debug.assert(!args.skip());
-    //     const results = [_]TestSuiteResult {
-    //         try runMulti(base64, allocator, arena_allocator, start, path, stdout_writer),
-    //     };
-    //     try printResults(&results, stdout_writer);
-    // } else if (std.mem.eql(u8, run_type, "full")) {
-    //     const path = args.next() orelse @panic("Missing path argument");
-    //     std.debug.assert(!args.skip());
-    //     try runMultipleSuites(allocator, arena_allocator, path, stdout_writer);
+    } else if (std.mem.eql(u8, run_type, "multi")) {
+        const start = args.next() orelse @panic("Missing start of name argument");
+        const path = args.next() orelse @panic("Missing path argument");
+        std.debug.assert(!args.skip());
+        const results = [_]tests.TestSuiteResult {
+            try tests.runMulti(tests.full64, allocator, arena_allocator, start, path, raw_stdout_writer),
+        };
+        try tests.printResults(&results, raw_stdout_writer);
+    } else if (std.mem.eql(u8, run_type, "full")) {
+        const path = args.next() orelse @panic("Missing path argument");
+        std.debug.assert(!args.skip());
+        try tests.runMultipleSuites(allocator, arena_allocator, path, raw_stdout_writer);
     } else if (std.mem.eql(u8, run_type, "spike")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());

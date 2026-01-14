@@ -11,6 +11,13 @@ const Allocator = mem.Allocator;
 const WordSize = cpu_config.WordSize;
 const CpuOptions = cpu_config.CpuOptions;
 
+pub const base32 = CpuOptions.makeBase(WordSize.w32);
+pub const base64 = CpuOptions.makeBase(WordSize.w64);
+
+pub const priv64 = base64.withPrivileged();
+
+pub const full64 = base64.withM().withA().withPrivileged();
+
 pub fn findAll(allocator: mem.Allocator, start: []const u8, path: fs.Dir) ![][]const u8 {
     var walker = try path.walk(allocator);
     defer walker.deinit();
@@ -219,7 +226,7 @@ const RemuRunResult = struct {
     failure_code: ?u64,
     signature: []u8,
 
-    fn deinit(self: @This(), allocator: Allocator) void {
+    pub fn deinit(self: @This(), allocator: Allocator) void {
         allocator.free(self.signature);
     }
 };
@@ -241,16 +248,18 @@ pub fn runRemu(
     ) orelse @panic("Failed reading signature data");
     const cpu_type = cpu.RVCPU(opt);
     const memory_start: cpu_type.Tword = 0x8000_0000;
-    const memory_size: cpu_type.Tword = 1024*1024;
+    const memory_size: cpu_type.Tword = 1024*1024*256;
     var rvcpu = try cpu_type.init(
         allocator,
         elf_file.getEntrypoint(),
         memory_start,
         memory_size,
         debug_writer,
-        signature_info.begin_signature.address,
-        signature_info.end_signature.address,
-        signature_info.tohost.address,
+        .{ 
+            .signature_start = signature_info.begin_signature.address,
+            .signature_end = signature_info.end_signature.address,
+            .tohost_address = signature_info.tohost.address,
+        },
         serial_writer,
     );
     defer rvcpu.deinit();
@@ -260,6 +269,44 @@ pub fn runRemu(
         const offset: cpu_type.Tword = @intCast(segment.data.len);
         try rvcpu.loadZeroes(segment.start_address + offset, segment.padding);
     }
+    while (!rvcpu.isHalted()) {
+        try rvcpu.tick();
+    }
+    const signature = try rvcpu.getSignature(allocator);
+    const failure_code = rvcpu.getTestFailureCode();
+    const failure_code_u64: ?u64 = if (failure_code) |code| @intCast(code) else null;
+    return .{
+        .failure_code = failure_code_u64,
+        .signature = signature,
+    };
+}
+
+pub fn runRemuBinary(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    image: []const u8,
+    debug_writer: ?std.io.AnyWriter,
+    serial_writer: std.io.AnyWriter,
+) !RemuRunResult {
+    const cpu_type = cpu.RVCPU(opt);
+    const memory_start: cpu_type.Tword = 0x8000_0000;
+    const memory_size: cpu_type.Tword = 1024*1024*256;
+    const image_data = try std.fs.cwd().readFileAlloc(
+        allocator,
+        image, memory_size
+    );
+    defer allocator.free(image_data);
+    var rvcpu = try cpu_type.init(
+        allocator,
+        memory_start,
+        memory_start,
+        memory_size,
+        debug_writer,
+        null,
+        serial_writer,
+    );
+    defer rvcpu.deinit();
+    try rvcpu.loadData(memory_start, image_data);
     while (!rvcpu.isHalted()) {
         try rvcpu.tick();
     }
@@ -309,12 +356,12 @@ fn stringCmp(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
-const TestSuiteResult = struct {
+pub const TestSuiteResult = struct {
     total_tests: usize,
     failed_tests: [][]const u8,
 };
 
-fn printResults(
+pub fn printResults(
     results: []const TestSuiteResult,
     writer: std.io.AnyWriter,
 ) !void {
@@ -458,73 +505,90 @@ pub fn printDiff(
     _ = posix.waitpid(child_pid, 0);
 }
 
-// TODO: reimplement
-// fn runMulti(
-//     comptime opt: CpuOptions,
-//     allocator: Allocator,
-//     result_allocator: Allocator,
-//     start: []const u8,
-//     path: []const u8,
-//     writer: std.io.AnyWriter
-// ) !TestSuiteResult {
-//     var arena = std.heap.ArenaAllocator.init(allocator);
-//     defer arena.deinit();
-//     const arena_allocator = arena.allocator();
-//
-//     const cwd = std.fs.cwd();
-//     const dest_dir = try cwd.openDir(path, .{ .iterate = true });
-//     const items = try tests.findAll(arena_allocator, start, dest_dir);
-//
-//     var total_tests: usize = 0;
-//     var passed_tests: usize = 0;
-//
-//     var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
-//     for (items) |i| {
-//         try writer.print("Running {s}\n", .{i});
-//         const pid = linux.fork();
-//         if (pid == 0) {
-//             const rl = linux.rlimit {
-//                 .cur = 1,
-//                 .max = 1,
-//             };
-//             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
-//
-//             try runSingle(opt, allocator, i, dest_dir, null_writer);
-//             std.process.exit(0);
-//         } else {
-//             var status: u32 = 0;
-//             std.debug.assert(linux.waitpid(@intCast(pid), &status, 0) == pid);
-//             const success = linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
-//             try writer.print("t={s}, success={}\n", .{i, success});
-//             if (success) {
-//                 passed_tests += 1;
-//             } else {
-//                 try failed_tests.append(i);
-//             }
-//         }
-//         total_tests += 1;
-//     }
-//     var result = TestSuiteResult {
-//         .total_tests = total_tests,
-//         .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
-//     };
-//     for (failed_tests.items, 0..) |t, i| {
-//         result.failed_tests[i] = try result_allocator.dupe(u8, t);
-//     }
-//     return result;
-// }
-//
-// pub fn runMultipleSuites(
-//     allocator: Allocator,
-//     result_allocator: Allocator,
-//     path: []const u8,
-//     writer: std.io.AnyWriter
-// ) !void {
-//     const results = [_]TestSuiteResult {
-//         try runMulti(base32, allocator, result_allocator, "rv32ui-p", path, writer),
-//         try runMulti(base64, allocator, result_allocator, "rv64ui-p", path, writer),
-//         try runMulti(base32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
-//         try runMulti(base64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
-//     };
-//     try printResults(&results, writer);
-// }
+pub fn runMulti(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    result_allocator: Allocator,
+    start: []const u8,
+    path: []const u8,
+    writer: std.io.AnyWriter
+) !TestSuiteResult {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const cwd = std.fs.cwd();
+    const dest_dir = try cwd.openDir(path, .{ .iterate = true });
+    const items = try findAll(arena_allocator, start, dest_dir);
+
+    var total_tests: usize = 0;
+    var passed_tests: usize = 0;
+
+    var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
+    for (items) |i| {
+        const image_path = try std.fs.path.join(
+            allocator,
+            &[_][]const u8 { path, i }
+        );
+        defer allocator.free(image_path);
+        try writer.print("Running {s}\n", .{i});
+        const spike_result = try runSpike(allocator, opt.word_size, image_path);
+        defer spike_result.deinit(allocator);
+        if (spike_result.isFailure()) {
+            @panic("Running spike failed!");
+        }
+        const pid = linux.fork();
+        if (pid == 0) {
+            const rl = linux.rlimit {
+                .cur = 1,
+                .max = 1,
+            };
+            std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
+
+            const remu_result = try runRemuAndCollectSerial(opt, allocator, image_path, null);
+            const run_result = RunDiscrepancy.init(allocator, spike_result, remu_result);
+            const process_exit_code: u8 = switch (run_result) {
+                .Discrepancy => 1,
+                .NoDiscrepancy => 0,
+            };
+            std.process.exit(process_exit_code);
+        } else {
+            var status: u32 = 0;
+            std.debug.assert(linux.waitpid(@intCast(pid), &status, 0) == pid);
+            const success = linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
+            try writer.print("t={s}, success={}\n", .{i, success});
+            if (success) {
+                passed_tests += 1;
+            } else {
+                try failed_tests.append(i);
+            }
+        }
+        total_tests += 1;
+    }
+    var result = TestSuiteResult {
+        .total_tests = total_tests,
+        .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
+    };
+    for (failed_tests.items, 0..) |t, i| {
+        result.failed_tests[i] = try result_allocator.dupe(u8, t);
+    }
+    return result;
+}
+
+pub fn runMultipleSuites(
+    allocator: Allocator,
+    result_allocator: Allocator,
+    path: []const u8,
+    writer: std.io.AnyWriter
+) !void {
+    const results = [_]TestSuiteResult {
+        // TODO: bring back 32bit
+        // try runMulti(priv32, allocator, result_allocator, "rv32ui-p", path, writer),
+        try runMulti(priv64, allocator, result_allocator, "rv64ui-p", path, writer),
+        // try runMulti(priv32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
+        try runMulti(priv64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
+        // try runMulti(priv32.withA(), allocator, result_allocator, "rv64um-p", path, writer),
+        try runMulti(priv64.withA(), allocator, result_allocator, "rv64ua-p", path, writer),
+    };
+    try printResults(&results, writer);
+}

@@ -15,12 +15,14 @@ pub const CpuOptions = struct {
 
     word_size: WordSize,
     m_extension: bool,
+    a_extension: bool,
     privileged: bool,
 
     pub fn makeBase(word_size: WordSize) CpuOptions {
         return .{
             .word_size = word_size,
             .m_extension = false,
+            .a_extension = false,
             .privileged = false,
         };
     }
@@ -28,6 +30,12 @@ pub const CpuOptions = struct {
     pub fn withM(self: Self) Self {
         var new = self;
         new.m_extension = true;
+        return new;
+    }
+
+    pub fn withA(self: Self) Self {
+        var new = self;
+        new.a_extension = true;
         return new;
     }
 
@@ -41,4 +49,3 @@ pub const CpuOptions = struct {
         return self.word_size.getTword();
     }
 };
-
