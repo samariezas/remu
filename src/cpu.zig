@@ -21,6 +21,29 @@ fn subtractBits(T: type, bit_count: usize) type {
     return std.meta.Int(.unsigned, @typeInfo(T).int.bits - bit_count);
 }
 
+fn isAligned(Tword: type, Talign: type, addr: Tword) bool {
+    const alignment_byte_count = @divExact(@typeInfo(Talign).int.bits, 8);
+    return (addr % alignment_byte_count) == 0;
+}
+
+test "alignment u32" {
+    const BASE_ADDR = 0x1000;
+    try std.testing.expect(isAligned(u64, u32, BASE_ADDR));
+    inline for (1..4) |i| {
+        try std.testing.expect(!isAligned(u64, u32, BASE_ADDR + i));
+    }
+    try std.testing.expect(isAligned(u64, u32, BASE_ADDR + 4));
+}
+
+test "alignment u64" {
+    const BASE_ADDR = 0x1000;
+    try std.testing.expect(isAligned(u64, u64, BASE_ADDR));
+    inline for (1..8) |i| {
+        try std.testing.expect(!isAligned(u64, u64, BASE_ADDR + i));
+    }
+    try std.testing.expect(isAligned(u64, u64, BASE_ADDR + 8));
+}
+
 fn signExtend(comptime T: type, val: anytype) T {
     // TODO: assertions about types
     const SignedOriginalType = toSigned(@TypeOf(val)); //i12
@@ -415,6 +438,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         tohost_address: opt.getTword()
     };
 
+    const MemoryReservation = struct {
+        address: opt.getTword(),
+        length: opt.getTword(),
+    };
+
     return struct {
         const Self = @This();
         pub const Tword = opt.getTword();
@@ -449,6 +477,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         
         medeleg: Tword,
         mscratch: Tword,
+
+        memory_reservation: ?MemoryReservation,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -598,6 +628,32 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
                 Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
                 Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
+            } else [_]Instr {}) ++
+            (if (opt.a_extension) [_]Instr {
+                Instr.makeF35("AMOSWAP.W", 0b0101111, 0b010, 0b00001,  handleAmoswapW,  null),
+                Instr.makeF35("AMOADD.W",  0b0101111, 0b010, 0b00000,  handleAmoaddW,   null),
+                Instr.makeF35("AMOXOR.W",  0b0101111, 0b010, 0b00100,  handleAmoxorW,   null),
+                Instr.makeF35("AMOAND.W",  0b0101111, 0b010, 0b01100,  handleAmoandW,   null),
+                Instr.makeF35("AMOOR.W",   0b0101111, 0b010, 0b01000,  handleAmoorW,    null),
+                Instr.makeF35("AMOMIN.W",  0b0101111, 0b010, 0b10000,  handleAmominW,   null),
+                Instr.makeF35("AMOMAX.W",  0b0101111, 0b010, 0b10100,  handleAmomaxW,   null),
+                Instr.makeF35("AMOMINU.W", 0b0101111, 0b010, 0b11000,  handleAmominuW,  null),
+                Instr.makeF35("AMOMAXU.W", 0b0101111, 0b010, 0b11100,  handleAmomaxuW,  null),
+
+                Instr.makeF35("AMOSWAP.D", 0b0101111, 0b011, 0b00001,  handleAmoswapD,  null),
+                Instr.makeF35("AMOADD.D",  0b0101111, 0b011, 0b00000,  handleAmoaddD,   null),
+                Instr.makeF35("AMOXOR.D",  0b0101111, 0b011, 0b00100,  handleAmoxorD,   null),
+                Instr.makeF35("AMOAND.D",  0b0101111, 0b011, 0b01100,  handleAmoandD,   null),
+                Instr.makeF35("AMOOR.D",   0b0101111, 0b011, 0b01000,  handleAmoorD,    null),
+                Instr.makeF35("AMOMIN.D",  0b0101111, 0b011, 0b10000,  handleAmominD,   null),
+                Instr.makeF35("AMOMAX.D",  0b0101111, 0b011, 0b10100,  handleAmomaxD,   null),
+                Instr.makeF35("AMOMINU.D", 0b0101111, 0b011, 0b11000,  handleAmominuD,  null),
+                Instr.makeF35("AMOMAXU.D", 0b0101111, 0b011, 0b11100,  handleAmomaxuD,  null),
+
+                Instr.makeF35("LR.W",      0b0101111, 0b010, 0b00010,  handleLrW,  null),
+                Instr.makeF35("SC.W",      0b0101111, 0b010, 0b00011,  handleScW,  null),
+                Instr.makeF35("LR.D",      0b0101111, 0b011, 0b00010,  handleLrD,  null),
+                Instr.makeF35("SC.D",      0b0101111, 0b011, 0b00011,  handleScD,  null),
             } else [_]Instr {});
 
         const Tcsrid: type = u12;
@@ -946,6 +1002,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     return null;
                 }
             }
+            try self.debugPrint("Caught illegal instruction!\n", .{});
             return TError { .IllegalInstruction = @intCast(instruction) };
         }
 
@@ -1062,6 +1119,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .spie = false,
                 .medeleg = 0,
                 .mscratch = 0,
+                .memory_reservation = null,
             };
         }
 
@@ -1901,6 +1959,262 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             self.spie = true;
             self.spp = .User;
             return null;
+        }
+
+        fn handleGenericAtomicOp(T: type, self: *Self, instruction: u32, operation: anytype) ?TError {
+            const num_bytes = @divExact(@typeInfo(T).int.bits, 8);
+            var bytes_read: [num_bytes]u8 = undefined;
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const address = self.getRegister(parsed.rs1);
+            self.bus.readMemory(address, &bytes_read) catch |err| switch (err) {
+                error.AccessFault => return TError { .LoadAccessFault = address },
+                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
+                error.PageFault => return TError { .LoadPageFault = address },
+            };
+            const old_memory_value: T = std.mem.readInt(T, &bytes_read, .little);
+            const truncated: T = @truncate(self.getRegister(parsed.rs2));
+            const new_value = operation.f(T, old_memory_value, truncated);
+            self.setRegister(parsed.rd, signExtend(Tword, old_memory_value));
+            std.mem.writeInt(T, &bytes_read, new_value, .little);
+            self.bus.writeMemory(address, &bytes_read) catch |err| switch (err) {
+                error.AccessFault => return TError { .LoadAccessFault = address },
+                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
+                error.PageFault => return TError { .LoadPageFault = address },
+            };
+            return null;
+        }
+
+        fn handleAmoswapW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, _: T, b: T) T {
+                    return b;
+                }
+            });
+        }
+
+        fn handleAmoaddW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a +% b;
+                }
+            });
+        }
+
+        fn handleAmoandW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a & b;
+                }
+            });
+        }
+
+        fn handleAmoorW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a | b;
+                }
+            });
+        }
+
+        fn handleAmoxorW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a ^ b;
+                }
+            });
+        }
+
+        fn handleAmominW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    const a_signed: toSigned(T) = @bitCast(a);
+                    const b_signed: toSigned(T) = @bitCast(b);
+                    if (a_signed < b_signed) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmomaxW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    const a_signed: toSigned(T) = @bitCast(a);
+                    const b_signed: toSigned(T) = @bitCast(b);
+                    if (a_signed > b_signed) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmominuW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    if (a < b) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmomaxuW(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u32, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    if (a > b) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmoswapD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, _: T, b: T) T {
+                    return b;
+                }
+            });
+        }
+
+        fn handleAmoaddD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a +% b;
+                }
+            });
+        }
+
+        fn handleAmoandD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a & b;
+                }
+            });
+        }
+
+        fn handleAmoorD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a | b;
+                }
+            });
+        }
+
+        fn handleAmoxorD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    return a ^ b;
+                }
+            });
+        }
+
+        fn handleAmominD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    const a_signed: toSigned(T) = @bitCast(a);
+                    const b_signed: toSigned(T) = @bitCast(b);
+                    if (a_signed < b_signed) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmomaxD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    const a_signed: toSigned(T) = @bitCast(a);
+                    const b_signed: toSigned(T) = @bitCast(b);
+                    if (a_signed > b_signed) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmominuD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    if (a < b) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleAmomaxuD(self: *Self, instruction: u32) ?TError {
+            return Self.handleGenericAtomicOp(u64, self, instruction, struct {
+                fn f(T: type, a: T, b: T) T {
+                    if (a > b) { return a; }
+                    else { return b; }
+                }
+            });
+        }
+
+        fn handleLrGeneric(T: type, self: *Self, instruction: u32) ?TError {
+            const byte_count = @divExact(@typeInfo(T).int.bits, 8);
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            if (parsed.rs2 != 0) {
+                return TError { .IllegalInstruction = 0, };
+            }
+            const address = self.getRegister(parsed.rs1);
+            if (!isAligned(Tword, T, address)) {
+                return TError { .LoadAddressMisaligned = address, };
+            }
+            var buffer: [byte_count]u8 = undefined;
+            // TODO: refactor out catch statement for reads
+            self.bus.readMemory(address, &buffer) catch |err| switch (err) {
+                error.AccessFault => return TError { .LoadAccessFault = address },
+                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
+                error.PageFault => return TError { .LoadPageFault = address },
+            };
+            self.memory_reservation = MemoryReservation {
+                .address = address,
+                .length = byte_count,
+            };
+            self.setRegister(
+                parsed.rd,
+                signExtend(Tword, std.mem.readInt(T, &buffer, .little))
+            );
+            return null;
+        }
+
+        fn handleScGeneric(T: type, self: *Self, instruction: u32) ?TError {
+            const byte_count = @divExact(@typeInfo(T).int.bits, 8);
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const address = self.getRegister(parsed.rs1);
+            if (!isAligned(Tword, T, address)) {
+                return TError { .LoadAddressMisaligned = address, };
+            }
+            var return_value: Tword = 1;
+            if (self.memory_reservation) |reservation| {
+                if (
+                    reservation.address == address and
+                    reservation.length == byte_count
+                ) {
+                    var buffer: [byte_count]u8 = undefined;
+                    const register_value: T = @truncate(self.getRegister(parsed.rs2));
+                    std.mem.writeInt(T, &buffer, register_value, .little);
+                    return_value = 0;
+                    self.bus.writeMemory(address, &buffer) catch |err| switch (err) {
+                        error.AccessFault => return TError { .LoadAccessFault = address },
+                        error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
+                        error.PageFault => return TError { .LoadPageFault = address },
+                    };
+                }
+            }
+            self.setRegister(parsed.rd, return_value);
+            self.memory_reservation = null;
+            return null;
+        }
+
+        fn handleLrW(self: *Self, instruction: u32) ?TError {
+            return Self.handleLrGeneric(u32, self, instruction);
+        }
+
+        fn handleLrD(self: *Self, instruction: u32) ?TError {
+            return Self.handleLrGeneric(u64, self, instruction);
+        }
+
+        fn handleScW(self: *Self, instruction: u32) ?TError {
+            return Self.handleScGeneric(u32, self, instruction);
+        }
+
+        fn handleScD(self: *Self, instruction: u32) ?TError {
+            return Self.handleScGeneric(u64, self, instruction);
         }
 
         fn handleNop(_: *Self, _: u32) ?TError {
