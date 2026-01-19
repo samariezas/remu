@@ -18,5 +18,5 @@ pkgsCross.stdenv.mkDerivation {
         --enable-static
   '';
 
-  dontFixup = false;
+  dontFixup = true;
 }

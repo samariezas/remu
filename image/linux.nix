@@ -1,8 +1,8 @@
-{ pkgs, pkgsCross }:
-pkgs.stdenvNoCC.mkDerivation {
+{ pkgs, pkgsCross, ... }:
+pkgsCross.stdenv.mkDerivation {
   name = "linux";
   version = "6.18.5";
-  src = pkgs.fetchzip {
+  src = pkgsCross.fetchzip {
     url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.5.tar.xz";
     hash = "sha256-YgS+IVTzvxjlZpAO3wTtf0vfUrF0HPIenQYM3ill738=";
   };
@@ -17,27 +17,27 @@ pkgs.stdenvNoCC.mkDerivation {
     bc
     flex
     bison
-  ]) ++ (with pkgsCross; [
     gcc
     binutils
-  ]);
-
-  buildInputs = (with pkgs; [
-    gcc
   ]);
 
   configurePhase = ''
     cp ${./configs/linux_minimal.config} ./.config
   '';
 
-  makeFlags = [
-    "ARCH=riscv"
-    "CROSS_COMPILE=riscv64-unknown-linux-musl-"
-  ];
+  preBuild = ''
+    makeFlagsArray+=(
+        KCFLAGS="-fno-pic -fno-pie"
+        KCPPFLAGS="-fno-pic -fno-pie"
+        LDFLAGS_vmlinux=-no-pie
+        ARCH=riscv
+        CROSS_COMPILE=riscv64-unknown-linux-musl-
+    )
+  '';
   
   installPhase = ''
     cp ./arch/riscv/boot/Image $out
   '';
 
-  dontFixup = false;
+  dontFixup = true;
 }

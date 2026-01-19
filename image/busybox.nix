@@ -1,5 +1,5 @@
 { pkgs, pkgsCross }:
-pkgs.stdenv.mkDerivation {
+pkgsCross.stdenv.mkDerivation {
   name = "busybox";
   version = "1.36.1";
   src = pkgs.fetchzip {
@@ -11,7 +11,7 @@ pkgs.stdenv.mkDerivation {
 
   patches = [ ./busybox_libbb.patch ];
 
-  nativeBuildInputs = with pkgsCross; [
+  nativeBuildInputs = with pkgs; [
     gcc
     binutils
   ];

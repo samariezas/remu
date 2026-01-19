@@ -19,7 +19,7 @@
           };
         };
       };
-      tests = import ./tests { inherit pkgs pkgsCross; };
+      tests = import ./tests { inherit pkgs; };
       image = import ./image { inherit pkgs pkgsCross; };
     in {
       packages.${system} = with tests; {
