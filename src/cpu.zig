@@ -898,6 +898,53 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return 0;
         }
 
+        fn handleReadMisa(_: *Self) Tword {
+            const parsed: packed struct {
+                a_extension: u1,
+                b_extension: u1,
+                c_extension: u1,
+                d_extension: u1,
+                zero1: u1,
+                f_extension: u1,
+                g_extension: u1,
+                h_extension: u1,
+                i_extension: u1,
+                zero2: u3,
+                m_extension: u1,
+                zero3: u3,
+                q_extension: u1,
+                zero4: u1,
+                s_extension: u1,
+                zero5: u1,
+                u_extension: u1,
+                v_extension: u1,
+                zero6: u40,
+                mxl: u2,
+            } = .{
+                .a_extension = @intFromBool(opt.a_extension),
+                .b_extension = 0,
+                .c_extension = 0,
+                .d_extension = 0,
+                .zero1 = 0,
+                .f_extension = 0,
+                .g_extension = 0,
+                .h_extension = 0,
+                .i_extension = 0,
+                .zero2 = 0,
+                .m_extension = @intFromBool(opt.m_extension),
+                .zero3 = 0,
+                .q_extension = 0,
+                .zero4 = 0,
+                .s_extension = 0,
+                .zero5 = 0,
+                .u_extension = 0,
+                .v_extension = 0,
+                .zero6 = 0,
+                .mxl = 1
+            };
+            return @bitCast(parsed);
+        }
+
         const csr_map = [_]CsrMapEntry{
             CsrMapEntry.new("mtvec",   0x305, TrapVectorCSR.handleWriteM,   TrapVectorCSR.handleReadM),
             CsrMapEntry.new("mepc",    0x341, handleWriteMepc,              handleReadMepc),
@@ -913,6 +960,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,           handleReadMedeleg),
             CsrMapEntry.new("mscratch",0x340, handleWriteMscratch,          handleReadMscratch),
+
+            CsrMapEntry.new("misa",    0x301, handleWriteStub,              handleReadMisa),
 
             // TODO: replace with non-stubs
             CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadMhartid),
@@ -934,7 +983,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return self.registers[id];
         }
 
-        fn setRegister(self: *Self, id: usize, val: Tword) void {
+        pub fn setRegister(self: *Self, id: usize, val: Tword) void {
             if (id != 0) {
                 self.registers[id] = val;
             }
@@ -1170,6 +1219,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     return csr;
                 }
             }
+            std.debug.print("W: returning zero for {x}\n", .{id});
             return null;
         }
 

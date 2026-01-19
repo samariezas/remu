@@ -284,18 +284,15 @@ pub fn runRemu(
 pub fn runRemuBinary(
     comptime opt: CpuOptions,
     allocator: Allocator,
-    image: []const u8,
+    image_path: []const u8,
+    dtb_path: []const u8,
     debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
 ) !RemuRunResult {
     const cpu_type = cpu.RVCPU(opt);
     const memory_start: cpu_type.Tword = 0x8000_0000;
     const memory_size: cpu_type.Tword = 1024*1024*256;
-    const image_data = try std.fs.cwd().readFileAlloc(
-        allocator,
-        image, memory_size
-    );
-    defer allocator.free(image_data);
+    var current_location = memory_start;
     var rvcpu = try cpu_type.init(
         allocator,
         memory_start,
@@ -306,7 +303,25 @@ pub fn runRemuBinary(
         serial_writer,
     );
     defer rvcpu.deinit();
-    try rvcpu.loadData(memory_start, image_data);
+    {
+        const image_data = try std.fs.cwd().readFileAlloc(
+            allocator,
+            image_path, memory_size
+        );
+        defer allocator.free(image_data);
+        try rvcpu.loadData(current_location, image_data);
+        current_location += image_data.len;
+    }
+    rvcpu.setRegister(11, current_location);
+    {
+        const dtb_data = try std.fs.cwd().readFileAlloc(
+            allocator,
+            dtb_path, memory_size
+        );
+        defer allocator.free(dtb_data);
+        try rvcpu.loadData(current_location, dtb_data);
+        current_location += dtb_data.len;
+    }
     while (!rvcpu.isHalted()) {
         try rvcpu.tick();
     }
