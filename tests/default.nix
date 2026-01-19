@@ -1,6 +1,5 @@
-{ pkgs }:
+{ pkgs, pkgsCross }:
 let
-  riscvPkgs = pkgs.pkgsCross.riscv64-embedded;
   riscvTestsSrc = pkgs.fetchFromGitHub {
     owner = "riscv-software-src";
     repo = "riscv-tests";
@@ -10,8 +9,8 @@ let
   };
 
   libprintf = import ./libprintf.nix {
-    stdenv = riscvPkgs.stdenv;
-    fetchFromGitHub = riscvPkgs.fetchFromGitHub;
+    stdenv = pkgsCross.stdenv;
+    fetchFromGitHub = pkgsCross.fetchFromGitHub;
   };
 in rec {
   spike-mod = pkgs.spike.overrideAttrs (old: {
@@ -32,7 +31,7 @@ in rec {
     installCheckPhase = null;
   });
 
-  riscv-tests-orig = riscvPkgs.stdenv.mkDerivation {
+  riscv-tests-orig = pkgsCross.stdenv.mkDerivation {
     name = "riscv-tests-orig";
     src = riscvTestsSrc;
 
@@ -68,7 +67,7 @@ in rec {
     '';
   });
 
-  riscv-devshell = riscvPkgs.mkShell {
+  riscv-devshell = pkgsCross.mkShell {
     nativeBuildInputs = with pkgs; [
       spike-mod
       dtc

@@ -1,0 +1,11 @@
+{ pkgs, pkgsCross }:
+rec {
+  musl = import ./musl.nix { inherit pkgsCross; };
+  busybox = import ./busybox.nix { inherit pkgsCross pkgs; };
+
+  linux = import ./linux.nix { inherit pkgsCross pkgs; };
+  initramfs = import ./initramfs.nix {
+    inherit pkgs;
+    derivations = [ musl busybox ];
+  };
+}

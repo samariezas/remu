@@ -9,12 +9,26 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-      tests = import ./tests { inherit pkgs; };
+      pkgsCross = import nixpkgs {
+        inherit system;
+        crossSystem = {
+          config = "riscv64-unknown-linux-musl";
+          gcc = {
+            arch = "rv64ima_zicsr_zifencei";
+            abi = "lp64";
+          };
+        };
+      };
+      tests = import ./tests { inherit pkgs pkgsCross; };
+      image = import ./image { inherit pkgs pkgsCross; };
     in {
       packages.${system} = with tests; {
         inherit riscv-tests
                 riscv-tests-orig;
-      };
+      } // (with image; {
+        image-linux = linux;
+        image-initramfs = initramfs;
+      });
 
       devShells.${system} = {
         default = pkgs.mkShell {
