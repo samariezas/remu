@@ -1,7 +1,7 @@
 CC := riscv64-none-elf-gcc
 LDFLAGS := -nostdlib -nostartfiles -nostdlib -nostartfiles -T ./link.ld
 LDLIBS := -lprintf
-CFLAGS := -c -O2 -march=rv64g -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles
+CFLAGS := -c -O2 -g -march=rv64g -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles
 
 .PHONY: all
 all: build/trap

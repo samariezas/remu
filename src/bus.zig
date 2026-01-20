@@ -75,7 +75,17 @@ fn BusDevice(comptime Tword: type) type {
                     const s_offset: usize = @intCast(offset);
                     @memcpy(dest, m.data[s_offset..(s_offset+dest.len)]);
                 },
-                .serial => return error.AccessFault,
+                .serial => {
+                    for (0..dest.len) |i| {
+                        const byte_offset = offset + i;
+                        if (byte_offset == 5) { // LSR
+                            // transmit buffer empty
+                            dest[i] = 0x20 | 0x40;
+                        } else {
+                            dest[i] = 0;
+                        }
+                    }
+                },
             }
         }
 

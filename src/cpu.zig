@@ -2,6 +2,7 @@ const std = @import("std");
 const bus = @import("bus.zig");
 const privilege = @import("privilege.zig");
 pub const cpu_config = @import("cpu_config.zig");
+const gdb_server = @import("gdb_server.zig");
 const Bus = bus.Bus;
 const BusDeviceConfig = bus.BusDeviceConfig;
 const Allocator = std.mem.Allocator;
@@ -479,6 +480,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         mscratch: Tword,
 
         memory_reservation: ?MemoryReservation,
+        gdb_connection: ?gdb_server.GdbDebugServer(opt),
 
         const Instr = InstructionDescriptor(opt);
 
@@ -914,14 +916,18 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 zero3: u3,
                 q_extension: u1,
                 zero4: u1,
-                s_extension: u1,
+                s_mode_support: u1,
                 zero5: u1,
-                u_extension: u1,
+                u_mode_support: u1,
                 v_extension: u1,
                 zero6: u40,
                 mxl: u2,
             } = .{
                 .a_extension = @intFromBool(opt.a_extension),
+                .s_mode_support = @intFromBool(opt.privileged),
+                .m_extension = @intFromBool(opt.m_extension),
+                .u_mode_support = @intFromBool(opt.privileged),
+
                 .b_extension = 0,
                 .c_extension = 0,
                 .d_extension = 0,
@@ -931,13 +937,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .h_extension = 0,
                 .i_extension = 0,
                 .zero2 = 0,
-                .m_extension = @intFromBool(opt.m_extension),
                 .zero3 = 0,
                 .q_extension = 0,
                 .zero4 = 0,
-                .s_extension = 0,
                 .zero5 = 0,
-                .u_extension = 0,
                 .v_extension = 0,
                 .zero6 = 0,
                 .mxl = 1
@@ -979,7 +982,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
-        fn getRegister(self: *Self, id: usize) Tword {
+        fn getRegister(self: *const Self, id: usize) Tword {
             return self.registers[id];
         }
 
@@ -1056,6 +1059,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn tick(self: *Self) DebugPrintError!void {
+            if (self.gdb_connection) |*conn| {
+                const continue_running = conn.poll(@ptrCast(self)) catch @panic("IO error");
+                if (!continue_running) {
+                    return;
+                }
+            }
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
                 std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
@@ -1125,6 +1134,35 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 try self.bus.writeMemory(start, slice);
             }
         }
+        
+        fn debugGetRegisters(self: *const Self) [32]Tword {
+            var result: [32]Tword = undefined;
+            for (0..32) |i| {
+                result[i] = self.getRegister(i);
+            }
+            return result;
+        }
+
+        fn debugGetPc(self: *const Self) Tword {
+            return self.pc;
+        }
+
+        fn debugReadMemory(self: *const Self, memory_start: Tword, dest: []u8) Tword {
+            for (0..dest.len) |i| {
+                var curr_byte: [1]u8 = undefined;
+                self.bus.readMemory(memory_start + i, &curr_byte) catch return i;
+                dest[i] = curr_byte[0];
+            }
+            return dest.len;
+        }
+
+        fn makeDebugInterface() gdb_server.DebugInterface(opt) {
+            return .{
+                .readRegisters = Self.debugGetRegisters,
+                .getPc = Self.debugGetPc,
+                .readMemory = Self.debugReadMemory,
+            };
+        }
 
         pub fn init(
             allocator: Allocator,
@@ -1134,6 +1172,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             writer: ?std.io.AnyWriter,
             signature_info: ?SignatureInfo,
             serial_writer: std.io.AnyWriter,
+            debugger_filepath: ?[]const u8,
         ) !RVCPU(opt) {
             const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
             const serial_device = BusDeviceConfig(Tword).makeSerial(0x10000000, serial_writer);
@@ -1141,6 +1180,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 memory_device,
                 serial_device,
             });
+            const gdb_connection = if (debugger_filepath) |debugger_path|
+                try gdb_server.GdbDebugServer(opt).init(
+                    allocator,
+                    debugger_path,
+                    Self.makeDebugInterface()
+                )
+            else null;
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
@@ -1169,6 +1215,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .medeleg = 0,
                 .mscratch = 0,
                 .memory_reservation = null,
+                .gdb_connection = gdb_connection,
             };
         }
 

@@ -237,6 +237,7 @@ pub fn runRemu(
     image: []const u8,
     debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
+    debugger_filepath: ?[]const u8,
 ) !RemuRunResult {
     const f = try std.fs.cwd().openFile(
         image, .{ .mode = .read_only }
@@ -261,6 +262,7 @@ pub fn runRemu(
             .tohost_address = signature_info.tohost.address,
         },
         serial_writer,
+        debugger_filepath,
     );
     defer rvcpu.deinit();
     var it = try elf_file.get_loadable_it();
@@ -288,6 +290,7 @@ pub fn runRemuBinary(
     dtb_path: []const u8,
     debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
+    gdb_socket_path: ?[]const u8,
 ) !RemuRunResult {
     const cpu_type = cpu.RVCPU(opt);
     const memory_start: cpu_type.Tword = 0x8000_0000;
@@ -301,6 +304,7 @@ pub fn runRemuBinary(
         debug_writer,
         null,
         serial_writer,
+        gdb_socket_path,
     );
     defer rvcpu.deinit();
     {
@@ -323,6 +327,8 @@ pub fn runRemuBinary(
         current_location += dtb_data.len;
     }
     while (!rvcpu.isHalted()) {
+    // for (0..100) |_| {
+        // if (rvcpu.isHalted()) break;
         try rvcpu.tick();
     }
     const signature = try rvcpu.getSignature(allocator);
@@ -355,11 +361,12 @@ pub fn runRemuAndCollectSerial(
     allocator: Allocator,
     image: []const u8,
     debug_writer: ?std.io.AnyWriter,
+    debugger_filepath: ?[]const u8,
 ) !CollectedRemuRunResult {
     var serial_output = std.ArrayList(u8).init(allocator);
     defer serial_output.deinit();
     const serial_writer = serial_output.writer().any();
-    const remu_result = try runRemu(opt, allocator, image, debug_writer, serial_writer);
+    const remu_result = try runRemu(opt, allocator, image, debug_writer, serial_writer, debugger_filepath);
     return .{
         .failure_code = remu_result.failure_code,
         .signature = remu_result.signature,
@@ -455,7 +462,7 @@ pub fn runSingle(
 ) !RunDiscrepancy {
     const spike_result = try runSpike(allocator, opt.word_size, image);
     errdefer spike_result.deinit(allocator);
-    const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer);
+    const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer, null);
     return RunDiscrepancy.init(allocator, spike_result, remu_result);
 }
 
@@ -560,7 +567,7 @@ pub fn runMulti(
             };
             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
 
-            const remu_result = try runRemuAndCollectSerial(opt, allocator, image_path, null);
+            const remu_result = try runRemuAndCollectSerial(opt, allocator, image_path, null, null);
             const run_result = RunDiscrepancy.init(allocator, spike_result, remu_result);
             const process_exit_code: u8 = switch (run_result) {
                 .Discrepancy => 1,

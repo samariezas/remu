@@ -31,7 +31,7 @@ pub fn main() !u8 {
     if (std.mem.eql(u8, run_type, "remu")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());
-        const result = try tests.runRemuAndCollectSerial(tests.full64, allocator, image, stdout_writer);
+        const result = try tests.runRemuAndCollectSerial(tests.full64, allocator, image, null, "./gdb.sock");
         defer result.deinit(allocator);
         try stdout_writer.print("Signature: {s}\n",
             .{std.fmt.fmtSliceHexLower(result.signature)});
@@ -44,9 +44,10 @@ pub fn main() !u8 {
     } else if (std.mem.eql(u8, run_type, "binary")) {
         const image_path = args.next() orelse @panic("Missing image argument");
         const dtb_path = args.next() orelse @panic("Missing dtb argument");
+        const gdb_socket = args.next();
         std.debug.assert(!args.skip());
         const result = try tests.runRemuBinary(
-            tests.full64, allocator, image_path, dtb_path, null, stdout_writer
+            tests.full64, allocator, image_path, dtb_path, null, raw_stdout_writer, gdb_socket
         );
         defer result.deinit(allocator);
     } else if (std.mem.eql(u8, run_type, "single")) {

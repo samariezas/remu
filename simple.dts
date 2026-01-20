@@ -55,8 +55,8 @@
       #interrupt-cells = <1>;
       interrupt-controller;
     };
-    SERIAL0: uart8250@10000000 {
-      compatible = "uart8250";
+    SERIAL0: ns16550@10000000 {
+      compatible = "ns16550";
       clock-frequency = <10000000>;
       interrupt-parent = <&PLIC>;
       interrupts = <1>;
