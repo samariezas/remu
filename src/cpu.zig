@@ -1272,7 +1272,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
             if (findCsr(id)) |csr| {
-                return csr.read_handler(self);
+                const csr_read = csr.read_handler(self);
+                return csr_read;
             }
             return null;
         }
@@ -1955,17 +1956,20 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         // TODO: faults on unknown CSRs
         fn handleCsrrw(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
+            const new_csr = self.getRegister(parsed.rs1);
             if (parsed.rd != 0) {
-                const old_csr = self.readCsr(parsed.imm).?;
+                const old_csr = self.readCsr(parsed.imm)
+                    orelse return TError { .IllegalInstruction = @intCast(instruction), };
                 self.setRegister(parsed.rd, old_csr);
             }
-            return self.writeCsr(parsed.imm, self.getRegister(parsed.rs1));
+            return self.writeCsr(parsed.imm, new_csr);
         }
         
         fn handleCsrr_debug(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
-                const csr = self.readCsr(parsed.imm).?;
+                const csr = self.readCsr(parsed.imm)
+                    orelse @panic("Debug CSR reading failed!");
                 self.setRegister(parsed.rd, csr);
             }
             return null;
@@ -1973,10 +1977,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleCsrrs(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const old_csr = self.readCsr(parsed.imm).?;
+            const old_csr = self.readCsr(parsed.imm)
+                orelse return TError { .IllegalInstruction = @intCast(instruction), };
+            const mask = self.getRegister(parsed.rs1);
             self.setRegister(parsed.rd, old_csr);
             if (parsed.rs1 != 0) {
-                const mask = self.getRegister(parsed.rs1);
                 const new_csr = old_csr | mask;
                 return self.writeCsr(parsed.imm, new_csr);
             }
@@ -1985,10 +1990,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleCsrrc(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const old_csr = self.readCsr(parsed.imm).?;
+            const old_csr = self.readCsr(parsed.imm)
+                orelse return TError { .IllegalInstruction = @intCast(instruction), };
+            const mask = self.getRegister(parsed.rs1);
             self.setRegister(parsed.rd, old_csr);
             if (parsed.rs1 != 0) {
-                const mask = self.getRegister(parsed.rs1);
                 const new_csr = old_csr & (~mask);
                 return self.writeCsr(parsed.imm, new_csr);
             }
@@ -1998,7 +2004,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleCsrrwi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
             if (parsed.rd != 0) {
-                const old_csr = self.readCsr(parsed.imm).?;
+                const old_csr = self.readCsr(parsed.imm)
+                    orelse return TError { .IllegalInstruction = @intCast(instruction), };
                 self.setRegister(parsed.rd, old_csr);
             }
             const imm_extended: Tword = @intCast(parsed.rs1);
@@ -2007,7 +2014,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleCsrrsi(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const old_csr = self.readCsr(parsed.imm).?;
+            const old_csr = self.readCsr(parsed.imm)
+                orelse return TError { .IllegalInstruction = @intCast(instruction), };
             self.setRegister(parsed.rd, old_csr);
             if (parsed.rs1 != 0) {
                 const mask: Tword = @intCast(parsed.rs1);
@@ -2019,7 +2027,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleCsrrci(self: *Self, instruction: u32) ?TError {
             const parsed: ITypeInstruction = @bitCast(instruction);
-            const old_csr = self.readCsr(parsed.imm).?;
+            const old_csr = self.readCsr(parsed.imm)
+                orelse return TError { .IllegalInstruction = @intCast(instruction), };
             self.setRegister(parsed.rd, old_csr);
             if (parsed.rs1 != 0) {
                 const mask: Tword = @intCast(parsed.rs1);
