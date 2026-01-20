@@ -478,6 +478,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         
         medeleg: Tword,
         mscratch: Tword,
+        sscratch: Tword,
 
         memory_reservation: ?MemoryReservation,
         gdb_connection: ?gdb_server.GdbDebugServer(opt),
@@ -889,9 +890,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleReadMedeleg(cpu: *Self) Tword { return cpu.medeleg; }
 
         fn handleWriteMscratch(cpu: *Self, value: Tword) void { cpu.mscratch = value; }
+        fn handleWriteSscratch(cpu: *Self, value: Tword) void { cpu.sscratch = value; }
         fn handleReadMscratch(cpu: *Self) Tword { return cpu.mscratch; }
+        fn handleReadSscratch(cpu: *Self) Tword { return cpu.sscratch; }
 
-        fn handleReadMhartid(_: *Self) Tword { return 0; }
+        fn handleReadZero(_: *Self) Tword { return 0; }
         fn handleWriteStub(cpu: *Self, _: Tword) void {
             cpu.debugPrint("W: Using write stub\n", .{}) catch @panic("Failed debug print");
         }
@@ -927,6 +930,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .s_mode_support = @intFromBool(opt.privileged),
                 .m_extension = @intFromBool(opt.m_extension),
                 .u_mode_support = @intFromBool(opt.privileged),
+                .mxl = switch (opt.word_size) {
+                    .w32 => 1,
+                    .w64 => 2,
+                },
 
                 .b_extension = 0,
                 .c_extension = 0,
@@ -943,7 +950,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .zero5 = 0,
                 .v_extension = 0,
                 .zero6 = 0,
-                .mxl = 1
             };
             return @bitCast(parsed);
         }
@@ -963,14 +969,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             CsrMapEntry.new("meledeg", 0x302, handleWriteMedeleg,           handleReadMedeleg),
             CsrMapEntry.new("mscratch",0x340, handleWriteMscratch,          handleReadMscratch),
+            CsrMapEntry.new("sscratch",0x140, handleWriteSscratch,          handleReadSscratch),
 
             CsrMapEntry.new("misa",    0x301, handleWriteStub,              handleReadMisa),
+            CsrMapEntry.new("mvendorid",0xf11,null,                         handleReadZero),
 
             // TODO: replace with non-stubs
-            CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadMhartid),
+            CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadZero),
             CsrMapEntry.new("pmpcfg0", 0x3a0, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("pmpaddr0",0x3b0, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mie",     0x304, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("sie",     0x104, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("sip",     0x144, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("mip",     0x344, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mideleg", 0x303, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mnstatus",0x744, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("satp",    0x180, handleWriteStub,             handleReadStub),
@@ -1067,7 +1078,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
-                std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
                 self.trap(err);
             }
         }
@@ -1176,9 +1186,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         ) !RVCPU(opt) {
             const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
             const serial_device = BusDeviceConfig(Tword).makeSerial(0x10000000, serial_writer);
+            const plic_device = BusDeviceConfig(Tword).makePlic(0xc000000);
             const cpu_bus = try Bus(Tword).init(allocator, &[_]BusDeviceConfig(Tword) {
                 memory_device,
                 serial_device,
+                plic_device,
             });
             const gdb_connection = if (debugger_filepath) |debugger_path|
                 try gdb_server.GdbDebugServer(opt).init(
@@ -1214,6 +1226,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .spie = false,
                 .medeleg = 0,
                 .mscratch = 0,
+                .sscratch = 0,
                 .memory_reservation = null,
                 .gdb_connection = gdb_connection,
             };

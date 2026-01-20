@@ -18,6 +18,20 @@ pub const BusError = error {
     PageFault
 };
 
+const PlicContext = struct {
+    uart_interrupt_enabled: bool,
+    priority_threshold: u32,
+};
+
+const InterruptConfig = struct {
+    priority: u32,
+};
+
+const PlicState = struct {
+    interrupts: [1]InterruptConfig,
+    contexts: [2]PlicContext,
+};
+
 fn BusDevice(comptime Tword: type) type {
     return struct {
         start_address: Tword,
@@ -30,6 +44,8 @@ fn BusDevice(comptime Tword: type) type {
             serial: struct {
                 writer: AnyWriter,
             },
+            // plic: PlicState,
+            plic: void,
         },
 
         const Self = @This();
@@ -57,11 +73,21 @@ fn BusDevice(comptime Tword: type) type {
             };
             return retval;
         }
+
+        fn initPlic(start_address: Tword) Self {
+            const retval = Self {
+                .start_address = start_address,
+                .length = 0x1000000,
+                .vtag = .{ .plic = undefined, },
+            };
+            return retval;
+        }
         
         fn deinit(self: *Self) void {
             switch (self.vtag) {
                 .memory => |*m| { m.*.allocator.free(m.*.data); },
                 .serial => { },
+                .plic => { },
             }
         }
 
@@ -86,6 +112,8 @@ fn BusDevice(comptime Tword: type) type {
                         }
                     }
                 },
+                // TODO: implement
+                .plic => @memset(dest, 0),
             }
         }
 
@@ -105,6 +133,8 @@ fn BusDevice(comptime Tword: type) type {
                         std.debug.assert(written == 1);
                     }
                 },
+                // TODO: implement
+                .plic => { },
             }
         }
     };
@@ -121,6 +151,9 @@ pub fn BusDeviceConfig(Tword: type) type {
             start: Tword,
             output_device: AnyWriter,
         },
+        plic: struct {
+            start: Tword
+        },
 
         pub fn makeMemory(address_start: Tword, length: Tword) Self {
             return .{ .memory = .{
@@ -135,11 +168,18 @@ pub fn BusDeviceConfig(Tword: type) type {
                 .output_device = output_device,
             }};
         }
+
+        pub fn makePlic(address_start: Tword) Self {
+            return .{ .plic = .{
+                .start = address_start,
+            }};
+        }
         
         fn buildDevice(self: *const Self, allocator: Allocator) !BusDevice(Tword) {
             return switch (self.*) {
                 .memory => |*m| try BusDevice(Tword).initMemory(allocator, m.start, m.length),
                 .serial => |*s| BusDevice(Tword).initSerial(s.start, s.output_device),
+                .plic => |*p| BusDevice(Tword).initPlic(p.start),
             };
         }
     };
