@@ -283,18 +283,38 @@ pub fn runRemu(
     };
 }
 
+fn alignOnPage(T: type, i: *T) void {
+    const page_size: T = 4096;
+    const alignment_mask: T = page_size - 1;
+    const new_value: T = (
+        (i.* + page_size) & (~alignment_mask)
+    );
+    i.* = new_value;
+}
+
 pub fn runRemuBinary(
     comptime opt: CpuOptions,
     allocator: Allocator,
     image_path: []const u8,
     dtb_path: []const u8,
+    kernel_path: []const u8,
     debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
     gdb_socket_path: ?[]const u8,
 ) !RemuRunResult {
     const cpu_type = cpu.RVCPU(opt);
+    const Tword = cpu_type.Tword;
+    const FwDynamicInfo = packed struct {
+        magic: Tword = 0x4942534f,
+        version: Tword = 2,
+        next_addr: Tword,
+        next_mode: Tword,
+        options: Tword,
+        boot_hart: Tword,
+    };
+
     const memory_start: cpu_type.Tword = 0x8000_0000;
-    const memory_size: cpu_type.Tword = 1024*1024*256;
+    const memory_size: cpu_type.Tword = 1024*1024*512;
     var current_location = memory_start;
     var rvcpu = try cpu_type.init(
         allocator,
@@ -307,6 +327,7 @@ pub fn runRemuBinary(
         gdb_socket_path,
     );
     defer rvcpu.deinit();
+    // load opensbi
     {
         const image_data = try std.fs.cwd().readFileAlloc(
             allocator,
@@ -316,7 +337,10 @@ pub fn runRemuBinary(
         try rvcpu.loadData(current_location, image_data);
         current_location += image_data.len;
     }
-    rvcpu.setRegister(11, current_location);
+    const dtb_location: cpu_type.Tword     = 0x8800_0000;
+    const kernel_location: cpu_type.Tword  = 0x9000_0000;
+    std.debug.assert(current_location < dtb_location);
+    current_location = dtb_location;
     {
         const dtb_data = try std.fs.cwd().readFileAlloc(
             allocator,
@@ -326,9 +350,31 @@ pub fn runRemuBinary(
         try rvcpu.loadData(current_location, dtb_data);
         current_location += dtb_data.len;
     }
+    alignOnPage(cpu_type.Tword, &current_location);
+    const boot_info_location = current_location;
+    current_location += @sizeOf(FwDynamicInfo);
+    alignOnPage(cpu_type.Tword, &current_location);
+    std.debug.assert(current_location < kernel_location);
+    current_location = kernel_location;
+    {
+        const kernel_data = try std.fs.cwd().readFileAlloc(
+            allocator,
+            kernel_path, memory_size
+        );
+        defer allocator.free(kernel_data);
+        try rvcpu.loadData(current_location, kernel_data);
+        current_location += kernel_data.len;
+    }
+    const next_boot_info = FwDynamicInfo {
+        .next_mode = @intCast(cpu.privilege.PrivilegeLevel.Supervisor.getEncoding()),
+        .options = 0,
+        .next_addr = kernel_location,
+        .boot_hart = 0,
+    };
+    try rvcpu.loadData(boot_info_location, std.mem.asBytes(&next_boot_info));
+    rvcpu.setRegister(11, dtb_location);
+    rvcpu.setRegister(12, boot_info_location);
     while (!rvcpu.isHalted()) {
-    // for (0..100) |_| {
-        // if (rvcpu.isHalted()) break;
         try rvcpu.tick();
     }
     const signature = try rvcpu.getSignature(allocator);

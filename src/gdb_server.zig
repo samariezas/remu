@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const CpuOptions = @import("cpu_config.zig").CpuOptions;
 const RVCPU = @import("cpu.zig").RVCPU;
+const Paging = @import("bus.zig").Paging;
 
 pub const CpuState = enum {
     Paused,
@@ -35,7 +36,7 @@ const RxBuffer = struct {
 
     fn findPacket(self: *const RxBuffer) ?Packet {
         const buffer = self.buffer.items;
-        std.debug.print("Have data: {} {s}\n", .{buffer.len, buffer});
+        // std.debug.print("Have data: {} {s}\n", .{buffer.len, buffer});
         const start_symbol = std.mem.indexOfScalar(u8, buffer, '$');
         if (start_symbol) |start| {
             const end_symbol = std.mem.indexOfScalar(u8, buffer, '#');
@@ -127,14 +128,18 @@ test "rx without leading" {
     try std.testing.expectEqualDeep("foobarbaz", buffer.buffer.items);
 }
 
+pub const CsrNameValuePair = struct{ name: []const u8, value: u64 };
 pub fn DebugInterface(opt: CpuOptions) type {
     const Tword = opt.getTword();
     return struct {
         const Self = @This();
 
-        readRegisters: *const fn(cpu: *const RVCPU(opt)) [32]Tword,
-        getPc: *const fn(cpu: *const RVCPU(opt)) Tword,
-        readMemory: *const fn(cpu: *const RVCPU(opt), start_addr: Tword, dest: []u8) Tword,
+        readRegisters: *const fn(*const RVCPU(opt)) [32]Tword,
+        getPc: *const fn(*const RVCPU(opt)) Tword,
+        readMemory: *const fn(*const RVCPU(opt), Tword, []u8) Tword,
+        getCsrs: *const fn(*const RVCPU(opt), Allocator) []CsrNameValuePair,
+        getPPN: *const fn(*const RVCPU(opt)) u44,
+        getPTEs: *const fn(*const RVCPU(opt), Allocator, ppn: u44) ?[]struct {usize, Paging(Tword).PageTableEntry},
     };
 }
 
@@ -232,9 +237,9 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 try self.handlePacket(&packet, cpu);
                 self.rx_buffer.shrink(&packet);
             }
-            std.debug.print("W: Trying CTRL-C: {any}\n", .{self.rx_buffer.buffer.items});
+            // std.debug.print("W: Trying CTRL-C: {any}\n", .{self.rx_buffer.buffer.items});
             if (std.mem.indexOfScalar(u8, self.rx_buffer.buffer.items, 0x3) != null) {
-                std.debug.print("W: received CTRL-C\n", .{});
+                // std.debug.print("W: received CTRL-C\n", .{});
                 self.cpu_state = .Paused;
                 self.rx_buffer.clear();
                 try self.sendResponse("S05");
@@ -242,7 +247,19 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
             return self.cpu_state;
         }
 
+        fn printHex(out: *std.ArrayList(u8), comptime format_str: []const u8, args: anytype) void {
+            var formatted_str_buffer: [256]u8 = undefined;
+            var hex_str_buffer: [512]u8 = undefined;
+            const formatted_str = std.fmt.bufPrint(&formatted_str_buffer, format_str, args)
+                catch @panic("Did not fit into buffer");
+            const hex_str = std.fmt.bufPrint(&hex_str_buffer, "{s}", .{std.fmt.fmtSliceHexUpper(formatted_str)})
+                catch @panic("Did not fit into buffer");
+            out.*.appendSlice(hex_str)
+                catch @panic("buy more ram");
+        }
+
         // TODO: verify checksums
+        // TODO: holy shit...
         fn handlePacket(self: *Self, packet: *const Packet, cpu: *RVCPU(opt)) !void {
             if (packet.dropped.len != 0) std.debug.print("W: dropped {} bytes of data: {s}\n", .{packet.dropped.len, packet.dropped});
 
@@ -250,8 +267,9 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
             // defer arena.deinit();
             // const allocator = arena.allocator();
 
+            std.debug.print("Packet: {s}\n", .{packet.payload});
             if (std.mem.startsWith(u8, packet.payload, "qSupported")) {
-                try self.sendResponse("PacketSize=4000;swbreak-;hwbreak+");
+                try self.sendResponse("PacketSize=4000;swbreak-;hwbreak+;vContSupported");
             } else if (std.mem.startsWith(u8, packet.payload, "vCont?")) {
                 try self.sendResponse("vCont;cs");
             } else if (std.mem.startsWith(u8, packet.payload, "Z0")) {
@@ -267,6 +285,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 }
             } else if (std.mem.eql(u8, packet.payload, "c")) {
                 self.cpu_state = .Running;
+                try self.sendResponse("OK");
             } else if (std.mem.startsWith(u8, packet.payload, "g")) {
                 try self.transmitRegisters(cpu);
             } else if (std.mem.startsWith(u8, packet.payload, "m")) {
@@ -284,14 +303,66 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 const length_str = it.next() orelse @panic("Missing length field");
                 std.debug.assert(it.next() == null);
                 const addr = std.fmt.parseInt(Tword, addr_str, 16) catch @panic("Cannot parse hex int");
-                const length = std.fmt.parseInt(Tword, length_str, 16) catch @panic("Cannot parse hex int");
-                std.debug.assert(length == 4);
+                _ = std.fmt.parseInt(Tword, length_str, 16) catch @panic("Cannot parse hex int");
+                // std.debug.assert(length == 4);
                 if (std.mem.eql(u8, head, "Z1")) {
                     try self.appendBreakpoint(addr);
                 } else {
                     self.removeBreakpoint(addr);
                 }
                 try self.sendResponse("OK");
+            } else if (std.mem.startsWith(u8, packet.payload, "qRcmd")) {
+                const custom_payload_hex = packet.payload[6..];
+                var custom_payload = try self.allocator.alloc(u8, @divExact(custom_payload_hex.len, 2));
+                defer self.allocator.free(custom_payload);
+                for (0..custom_payload.len) |i| {
+                    custom_payload[i] = try std.fmt.parseInt(u8, custom_payload_hex[(2*i)..(2*(i+1))], 16);
+                }
+                var write_buffer = std.ArrayList(u8).init(self.allocator);
+                defer write_buffer.deinit();
+                if (std.mem.eql(u8, custom_payload, "csrs")) {
+                    const csrs = self.debug_interface.getCsrs(cpu, self.allocator);
+                    defer self.allocator.free(csrs);
+                    for (csrs) |csr| {
+                        printHex(&write_buffer, "{s}: {x}\n", .{csr.name, csr.value});
+                    }
+                } else if (std.mem.startsWith(u8, custom_payload, "mempages")) {
+                    var space_it = std.mem.splitScalar(u8, custom_payload, ' ');
+                    _ = space_it.next();
+                    const ppn_: ?u44 = if (space_it.next()) |ppn_str|
+                        std.fmt.parseInt(u44, ppn_str, 16) catch null
+                        else self.debug_interface.getPPN(cpu);
+
+                    if (ppn_) |ppn| {
+                        printHex(&write_buffer, "PTEs @{x}:\n", .{ppn});
+                        const mem_map = self.debug_interface.getPTEs(cpu, self.allocator, ppn);
+                        if (mem_map) |mmap| {
+                            defer self.allocator.free(mmap);
+                            for (mmap) |mm| {
+                                const index, const pte = mm;
+                                printHex(&write_buffer, "{x:0<3}: {x} r{s}w{s}x{s}", .{
+                                    index,
+                                    @as(u44, @bitCast(pte.ppn)),
+                                    if (pte.r != 0) "+" else "-",
+                                    if (pte.w != 0) "+" else "-",
+                                    if (pte.x != 0) "+" else "-",
+                                });
+                                if (pte.r != 0 or pte.w != 0 or pte.x != 0) printHex(&write_buffer, " {any}", .{pte});
+                                printHex(&write_buffer, "\n", .{});
+                            }
+                        } else {
+                            printHex(&write_buffer, "Cannot get memory map\n", .{});
+                        }
+                    } else {
+                        printHex(&write_buffer, "Cannot print out \n", .{});
+                    }
+                } else if (std.mem.eql(u8, custom_payload, "step")) {
+                    self.cpu_state = .SingleTick;
+                    printHex(&write_buffer, "Doing single tick\n", .{});
+                } else {
+                    printHex(&write_buffer, "Unknown command `{s}`\n", .{custom_payload});
+                }
+                try self.sendResponse(write_buffer.items);
             } else {
                 try self.sendUnknown(packet);
             }
@@ -342,7 +413,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
             for (response) |char| {
                 checksum +%= char;
             }
-            std.debug.print("Sending response: {s}\n", .{response});
+            // std.debug.print("Sending response: {s}\n", .{response});
             const client_writer = self.client.writer();
             var buffered_writer_outer = std.io.bufferedWriter(client_writer);
             var buffered_writer = buffered_writer_outer.writer();

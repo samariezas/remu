@@ -9,6 +9,8 @@ pkgsCross.stdenv.mkDerivation {
 
   enableParallelBuilding = true;
 
+  buildInputs = (with pkgs; [ ncurses ]);
+
   nativeBuildInputs = (with pkgs; [
     pkg-config
     autoconf

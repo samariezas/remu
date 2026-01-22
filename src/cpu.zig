@@ -1,6 +1,6 @@
 const std = @import("std");
 const bus = @import("bus.zig");
-const privilege = @import("privilege.zig");
+pub const privilege = @import("privilege.zig");
 pub const cpu_config = @import("cpu_config.zig");
 const gdb_server = @import("gdb_server.zig");
 const Bus = bus.Bus;
@@ -452,7 +452,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         allocator: Allocator,
         registers: [32]Tword,
         pc: Tword,
-        bus: Bus(Tword),
+        _bus: Bus(Tword),
         test_result: ?TestResult(Tword),
         writer: ?std.io.AnyWriter,
         // TODO: refactor everything used for testing (signatures, tohost, results)
@@ -482,6 +482,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         memory_reservation: ?MemoryReservation,
         gdb_connection: ?gdb_server.GdbDebugServer(opt),
+        
+        paging_enabled: bool,
+        asid: u16,
+        ppn: u44,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -568,9 +572,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             Instr.makeNone("AUIPC", 0b0010111, handleAuipc, UWriter),
 
             // Misc
-            Instr.makeDirect("ECALL", 0x73, handleEcall, null).noJump(),
-            Instr.makeF3("FENCE",   0b0001111, 0, handleNop,   null),
-            Instr.makeF3("FENCE.I", 0b0001111, 1, handleNop,   null),
+            Instr.makeDirect("ECALL", 0x73,         handleEcall, null).noJump(),
+            Instr.makeDirect("EBREAK",0x100073,     handleEbreak, null).noJump(),
+            Instr.makeF3("FENCE",   0b0001111, 0,   handleNop,   null),
+            Instr.makeF3("FENCE.I", 0b0001111, 1,   handleNop,   null),
         } ++ 
             (if (opt.word_size == .w64) [_]Instr {
                 Instr.makeF3("LWU",  0b0000011, 6,    handleLwu,  null),
@@ -631,6 +636,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
                 Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
                 Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
+
+                Instr.makeF37("SFENCE.VMA", 0b1110011, 0, 9, handleNop, null),
             } else [_]Instr {}) ++
             (if (opt.a_extension) [_]Instr {
                 Instr.makeF35("AMOSWAP.W", 0b0101111, 0b010, 0b00001,  handleAmoswapW,  null),
@@ -661,7 +668,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         const Tcsrid: type = u12;
         const CsrWriteHandler = *const fn (*Self, Tword) void;
-        const CsrReadHandler = *const fn (*Self) Tword;
+        const CsrReadHandler = *const fn (*const Self) Tword;
         const CsrMapEntry = struct {
             name: []const u8,
             id: Tcsrid,
@@ -715,11 +722,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 TrapVectorCSR.handleWrite(&cpu.s_trap_mode, &cpu.s_trap_handler_address, value);
             }
 
-            fn handleReadM(cpu: *Self) Tword {
+            fn handleReadM(cpu: *const Self) Tword {
                 return TrapVectorCSR.handleRead(&cpu.m_trap_mode, &cpu.m_trap_handler_address);
             }
 
-            fn handleReadS(cpu: *Self) Tword {
+            fn handleReadS(cpu: *const Self) Tword {
                 return TrapVectorCSR.handleRead(&cpu.s_trap_mode, &cpu.s_trap_handler_address);
             }
         };
@@ -766,7 +773,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 }
             }
 
-            fn handleRead(cpu: *Self) Tword {
+            fn handleRead(cpu: *const Self) Tword {
                 comptime if (@bitSizeOf(MStatusCSR) != @bitSizeOf(Tword)) {
                     @compileError("MStatusCSR mismatch");
                 };
@@ -839,7 +846,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 cpu.spp = SppPrivilegeLevel.fromEncoding(new_sstatus.spp);
             }
 
-            fn handleRead(cpu: *Self) Tword {
+            fn handleRead(cpu: *const Self) Tword {
                 comptime if (@bitSizeOf(SStatusCSR) != @bitSizeOf(Tword)) {
                     @compileError("SStatusCSR mismatch");
                 };
@@ -872,38 +879,65 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         };
 
+        const SatpCSR = packed struct {
+            ppn: u44,
+            asid: u16,
+            mode: u4,
+
+            fn handleWrite(cpu: *Self, value: Tword) void {
+                const parsed: SatpCSR = @bitCast(value);
+                std.debug.print("Writing satp={any} @{x}\n", .{parsed, cpu.pc});
+                cpu.ppn = parsed.ppn;
+                cpu.asid = parsed.asid;
+                switch (parsed.mode) {
+                    0 => cpu.paging_enabled = false,  // no paging
+                    8 => cpu.paging_enabled = true,   // sv39
+                    else => {},
+                }
+            }
+
+            fn handleRead(cpu: *const Self) Tword {
+                const retval = SatpCSR {
+                    .ppn = cpu.ppn,
+                    .asid = cpu.asid,
+                    .mode = if (cpu.paging_enabled) 8 else 0,
+                };
+                return @bitCast(retval);
+            }
+        };
+
         fn handleWriteMepc(cpu: *Self, value: Tword) void { cpu.mepc = value; }
-        fn handleReadMepc(cpu: *Self) Tword { return cpu.mepc; }
+        fn handleReadMepc(cpu: *const Self) Tword { return cpu.mepc; }
         fn handleWriteMcause(cpu: *Self, value: Tword) void { cpu.mcause = value; }
-        fn handleReadMcause(cpu: *Self) Tword { return cpu.mcause; }
+        fn handleReadMcause(cpu: *const Self) Tword { return cpu.mcause; }
         fn handleWriteMtval(cpu: *Self, value: Tword) void { cpu.mtval = value; }
-        fn handleReadMtval(cpu: *Self) Tword { return cpu.mtval; }
+        fn handleReadMtval(cpu: *const Self) Tword { return cpu.mtval; }
 
         fn handleWriteSepc(cpu: *Self, value: Tword) void { cpu.sepc = value; }
-        fn handleReadSepc(cpu: *Self) Tword { return cpu.sepc; }
+        fn handleReadSepc(cpu: *const Self) Tword { return cpu.sepc; }
         fn handleWriteScause(cpu: *Self, value: Tword) void { cpu.scause = value; }
-        fn handleReadScause(cpu: *Self) Tword { return cpu.scause; }
+        fn handleReadScause(cpu: *const Self) Tword { return cpu.scause; }
         fn handleWriteStval(cpu: *Self, value: Tword) void { cpu.stval = value; }
-        fn handleReadStval(cpu: *Self) Tword { return cpu.stval; }
+        fn handleReadStval(cpu: *const Self) Tword { return cpu.stval; }
 
         fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value & 0xfcb7ff; }
-        fn handleReadMedeleg(cpu: *Self) Tword { return cpu.medeleg; }
+        fn handleReadMedeleg(cpu: *const Self) Tword { return cpu.medeleg; }
 
         fn handleWriteMscratch(cpu: *Self, value: Tword) void { cpu.mscratch = value; }
         fn handleWriteSscratch(cpu: *Self, value: Tword) void { cpu.sscratch = value; }
-        fn handleReadMscratch(cpu: *Self) Tword { return cpu.mscratch; }
-        fn handleReadSscratch(cpu: *Self) Tword { return cpu.sscratch; }
+        fn handleReadMscratch(cpu: *const Self) Tword { return cpu.mscratch; }
+        fn handleReadSscratch(cpu: *const Self) Tword { return cpu.sscratch; }
 
-        fn handleReadZero(_: *Self) Tword { return 0; }
+        fn handleReadZero(_: *const Self) Tword { return 0; }
         fn handleWriteStub(cpu: *Self, _: Tword) void {
             cpu.debugPrint("W: Using write stub\n", .{}) catch @panic("Failed debug print");
         }
-        fn handleReadStub(cpu: *Self) Tword {
+        fn handleReadStub(cpu: *const Self) Tword {
             cpu.debugPrint("W: Using read stub\n", .{}) catch @panic("Failed debug print");
             return 0;
         }
 
-        fn handleReadMisa(_: *Self) Tword {
+        fn handleReadMisa(_: *const Self) Tword {
             const parsed: packed struct {
                 a_extension: u1,
                 b_extension: u1,
@@ -984,10 +1018,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("mip",     0x344, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mideleg", 0x303, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mnstatus",0x744, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("satp",    0x180, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("satp",    0x180, SatpCSR.handleWrite,         SatpCSR.handleRead),
+
+            // LINUX stubs
+            // TODO: replace with non-stubs
+            CsrMapEntry.new("scounteren",0x106, handleWriteStub,           handleReadStub),
         };
 
-        fn debugPrint(self: *Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
+        fn debugPrint(self: *const Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
             if (self.writer) |writer| {
                 writer.print(format, args) catch return error.WriteFailed;
             }
@@ -1000,6 +1038,91 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pub fn setRegister(self: *Self, id: usize, val: Tword) void {
             if (id != 0) {
                 self.registers[id] = val;
+            }
+        }
+
+        const TranslationResult = union(enum) {
+            Ok: Tword,
+            Err: TError,
+        };
+
+        fn mapTranslationError(address: Tword, err: (bus.TranslationError || bus.BusError), reason: bus.TranslationReason) TError {
+            // TODO: check if these exceptions are correct
+            switch (err) {
+                error.CannotReadPageTableEntry,
+                error.InvalidPTE,
+                error.TranslationTooDeep,
+                error.DisallowedOperation,
+                error.MisalignedSuperpage,
+                error.PageFault,
+                    => return switch (reason) {
+                        .Read => TError { .LoadPageFault = address, },
+                        .Write => TError { .StorePageFault = address, },
+                        .Execute => TError { .InstructionPageFault = address, },
+                    },
+
+                error.AccessFault
+                    => return switch (reason) {
+                        .Read => TError { .LoadAccessFault = address, },
+                        .Write => TError { .StoreAccessFault = address, },
+                        .Execute => TError { .InstructionAccessFault = address, },
+                    },
+
+                error.AlignmentFault
+                    => return switch (reason) {
+                        .Read => TError { .LoadAddressMisaligned = address, },
+                        .Write => TError { .StoreAddressMisaligned = address, },
+                        .Execute => TError { .InstructionAddressMisaligned = address, },
+                    },
+            }
+        }
+
+        fn translateAddress(self: *const Self, address: Tword, reason: bus.TranslationReason) TranslationResult {
+            var translated_address = address;
+            if (self.paging_enabled and self.current_privilege_level != .Machine) {
+                translated_address = bus.Paging(Tword).translateAddress(
+                    &self._bus,
+                    @bitCast(address),
+                    self.ppn,
+                    reason
+                ) catch |err|
+                    return .{ .Err = mapTranslationError(address, err, reason), };
+            }
+            return TranslationResult {
+                .Ok = translated_address,
+            };
+        }
+
+        // TODO: properly handle misaligned memory in here and writeMemory
+        // TODO: maybe split out into byte reads/writes
+        fn readMemory(self: *const Self, address: Tword, dest: []u8, comptime reason: bus.TranslationReason) ?TError {
+            switch (reason) {
+                .Execute,
+                .Read => {},
+                .Write => @compileError("Cannot read memory with write reason"),
+            }
+            switch (self.translateAddress(address, reason)) {
+                .Ok => |new_addr| {
+                    self._bus.readMemory(new_addr, dest) catch |err|
+                        return mapTranslationError(new_addr, err, reason);
+                    return null;
+                },
+                .Err => |e| {
+                    return e;
+                },
+            }
+        }
+
+        fn writeMemory(self: *Self, address: Tword, src: []const u8) ?TError {
+            switch (self.translateAddress(address, .Write)) {
+                .Ok => |new_addr| {
+                    self._bus.writeMemory(new_addr, src) catch |err|
+                        return mapTranslationError(new_addr, err, .Write);
+                    return null;
+                },
+                .Err => |e| {
+                    return e;
+                },
             }
         }
 
@@ -1038,11 +1161,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
             try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
-            const instruction = self.getNextInstruction() catch |err| switch (err) { 
-                error.AlignmentFault => return TError { .InstructionAddressMisaligned = self.pc },
-                error.AccessFault => return TError { .InstructionAccessFault = self.pc },
-                error.PageFault => return TError { .InstructionPageFault = self.pc },
-            };
+            var instruction: u32 = undefined;
+            if (self.getNextInstruction(&instruction)) |err| {
+                return err;
+            }
             const instruction_id: InstructionIdentifiers = @bitCast(instruction);
             try self.debugPrint(" Instr=0x{x:0>8}\n", .{instruction});
             try self.debugPrint("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
@@ -1070,6 +1192,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn tick(self: *Self) DebugPrintError!void {
+            if (self.pc == 0xffffffff80000160) {
+                // _ = std.c.raise(std.c.SIG.TRAP);
+            }
             if (self.gdb_connection) |*conn| {
                 const continue_running = conn.poll(@ptrCast(self)) catch @panic("IO error");
                 if (!continue_running) {
@@ -1078,6 +1203,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
+                std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
                 self.trap(err);
             }
         }
@@ -1126,14 +1252,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
-        fn getNextInstruction(self: *Self) bus.BusError!u32 {
+        fn getNextInstruction(self: *Self, instruction: *u32) ?TError {
             var bytes: [4]u8 = undefined;
-            try self.bus.readMemory(self.pc, &bytes);
-            return std.mem.readInt(u32, &bytes, LittleEndian);
+            if (self.readMemory(self.pc, &bytes, .Execute)) |err| {
+                return err;
+            }
+            instruction.* = std.mem.readInt(u32, &bytes, LittleEndian);
+            return null;
         }
 
         pub fn loadData(self: *Self, start: Tword, buffer: []const u8) !void {
-            try self.bus.writeMemory(start, buffer);
+            if (self.writeMemory(start, buffer) != null) {
+                return error.LoadFailed;
+            }
         }
 
         pub fn loadZeroes(self: *Self, start: Tword, count: Tword) !void {
@@ -1141,7 +1272,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 var buffer: [1024*1024]u8 = undefined;
                 const slice = buffer[0..count];
                 @memset(slice, 0);
-                try self.bus.writeMemory(start, slice);
+                if (self.writeMemory(start, slice) != null) {
+                    return error.LoadFailed;
+                }
             }
         }
         
@@ -1160,10 +1293,34 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn debugReadMemory(self: *const Self, memory_start: Tword, dest: []u8) Tword {
             for (0..dest.len) |i| {
                 var curr_byte: [1]u8 = undefined;
-                self.bus.readMemory(memory_start + i, &curr_byte) catch return i;
+                // TODO: returning a slice would be better
+                if (self.readMemory(memory_start + i, &curr_byte, .Read) != null) return i;
                 dest[i] = curr_byte[0];
             }
             return dest.len;
+        }
+
+        fn debugGetCSRs(self: *const Self, allocator: Allocator) []gdb_server.CsrNameValuePair {
+            const result = allocator.alloc(gdb_server.CsrNameValuePair, Self.csr_map.len) catch @panic("Failed alloc");
+            for (0..csr_map.len) |i| {
+                result[i] = .{
+                    .name = csr_map[i].name,
+                    .value = csr_map[i].read_handler(self),
+                };
+            }
+            return result;
+        }
+
+        fn debugGetPPN(self: *const Self) u44 {
+            return self.ppn;
+        }
+
+        fn debugGetPTEs(self: *const Self, allocator: Allocator, ppn: u44) ?[]struct {usize, bus.Paging(Tword).PageTableEntry} {
+            return bus.Paging(Tword).getPageTableEntries(allocator, &self._bus, ppn)
+                catch |err| {
+                    std.debug.print("Cannot read memory map: {any}", .{err});  
+                    return null;
+                };
         }
 
         fn makeDebugInterface() gdb_server.DebugInterface(opt) {
@@ -1171,6 +1328,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .readRegisters = Self.debugGetRegisters,
                 .getPc = Self.debugGetPc,
                 .readMemory = Self.debugReadMemory,
+                .getCsrs = Self.debugGetCSRs,
+                .getPPN = Self.debugGetPPN,
+                .getPTEs = Self.debugGetPTEs,
             };
         }
 
@@ -1203,7 +1363,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
                 .pc = entrypoint,
-                .bus = cpu_bus,
+                ._bus = cpu_bus,
                 .test_result = null,
                 .writer = writer,
                 .signature_info = signature_info,
@@ -1229,16 +1389,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .sscratch = 0,
                 .memory_reservation = null,
                 .gdb_connection = gdb_connection,
+                .paging_enabled = false,
+                .asid = 0,
+                .ppn = 0,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.bus.deinit(self.allocator);
+            self._bus.deinit(self.allocator);
         }
 
         pub fn isHalted(self: *Self) bool {
             if (self.signature_info) |signature_info| {
-                const word = self.bus.readWord(signature_info.tohost_address) catch unreachable;
+                const word = self._bus.readWord(signature_info.tohost_address) catch unreachable;
                 if (word > 0) {
                     self.test_result = TestResult(Tword) {
                         .a0 = word >> 1,
@@ -1262,7 +1425,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             if (self.signature_info) |signature_info| {
                 const signature_length = signature_info.signature_end - signature_info.signature_start;
                 const buffer: []u8 = try allocator.alloc(u8, @intCast(signature_length));
-                try self.bus.readMemory(signature_info.signature_start, buffer);
+                try self._bus.readMemory(signature_info.signature_start, buffer);
                 return buffer;
             } else {
                 return try allocator.alloc(u8, 0);
@@ -1286,6 +1449,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
             if (findCsr(id)) |csr| {
                 const csr_read = csr.read_handler(self);
+                // std.debug.print("Read CSR {s} = 0x{x}\n", .{csr.name, csr_read});
                 return csr_read;
             }
             return null;
@@ -1294,6 +1458,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn writeCsr(self: *Self, id: Tcsrid, value: Tword) ?TError {
             if (findCsr(id)) |csr| {
                 if (csr.write_handler) |handler| {
+                    // std.debug.print("Writing CSR {s} = 0x{x}\n", .{csr.name, value});
                     handler(self, value);
                     return null;
                 }
@@ -1600,11 +1765,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             const imm_extended = signExtend(Tword, parsed.imm);
             const address = self.getRegister(parsed.rs1) +% imm_extended;
             var bytes_read: [bitcnt/8]u8 = undefined;
-            self.bus.readMemory(address, &bytes_read) catch |err| switch (err) {
-                error.AccessFault => return TError { .LoadAccessFault = address },
-                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
-                error.PageFault => return TError { .LoadPageFault = address },
-            };
+            if (self.readMemory(address, &bytes_read, .Read)) |err| return err;
             const read_memory: T = std.mem.readInt(T, &bytes_read, LittleEndian);
             const result: Tword = if (sign_extend) signExtend(Tword, read_memory) else @intCast(read_memory);
             self.setRegister(parsed.rd, result);
@@ -1646,12 +1807,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             const address = self.getRegister(parsed.rs1) +% imm_extended;
             var to_write: [@typeInfo(Tword).int.bits/8]u8 = undefined;
             std.mem.writeInt(Tword, &to_write, self.getRegister(parsed.rs2), LittleEndian);
-            self.bus.writeMemory(address, to_write[0..(bitcnt/8)]) catch |err| switch (err) {
-                error.AccessFault => return TError { .StoreAccessFault = address },
-                error.AlignmentFault => return TError { .StoreAddressMisaligned = address },
-                error.PageFault => return TError { .StorePageFault = address },
-            };
-            return null;
+            return self.writeMemory(address, to_write[0..(bitcnt/8)]);
         }
 
         fn handleSb(self: *Self, instruction: u32) ?TError {
@@ -1782,6 +1938,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .Supervisor => TError.EcallFromS,
                 .Machine => TError.EcallFromM,
             };
+        }
+
+        fn handleEbreak(self: *Self, _: u32) ?TError {
+            return TError{ .Breakpoint = self.pc };
         }
 
         fn handleMul(self: *Self, instruction: u32) ?TError {
@@ -2085,21 +2245,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             var bytes_read: [num_bytes]u8 = undefined;
             const parsed: RTypeInstruction = @bitCast(instruction);
             const address = self.getRegister(parsed.rs1);
-            self.bus.readMemory(address, &bytes_read) catch |err| switch (err) {
-                error.AccessFault => return TError { .LoadAccessFault = address },
-                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
-                error.PageFault => return TError { .LoadPageFault = address },
-            };
+            if (self.readMemory(address, &bytes_read, .Read)) |err| return err;
             const old_memory_value: T = std.mem.readInt(T, &bytes_read, .little);
             const truncated: T = @truncate(self.getRegister(parsed.rs2));
             const new_value = operation.f(T, old_memory_value, truncated);
             self.setRegister(parsed.rd, signExtend(Tword, old_memory_value));
             std.mem.writeInt(T, &bytes_read, new_value, .little);
-            self.bus.writeMemory(address, &bytes_read) catch |err| switch (err) {
-                error.AccessFault => return TError { .LoadAccessFault = address },
-                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
-                error.PageFault => return TError { .LoadPageFault = address },
-            };
+            if (self.writeMemory(address, &bytes_read)) |err| return err;
             return null;
         }
 
@@ -2274,12 +2426,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 return TError { .LoadAddressMisaligned = address, };
             }
             var buffer: [byte_count]u8 = undefined;
-            // TODO: refactor out catch statement for reads
-            self.bus.readMemory(address, &buffer) catch |err| switch (err) {
-                error.AccessFault => return TError { .LoadAccessFault = address },
-                error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
-                error.PageFault => return TError { .LoadPageFault = address },
-            };
+            if (self.readMemory(address, &buffer, .Read)) |err| return err;
             self.memory_reservation = MemoryReservation {
                 .address = address,
                 .length = byte_count,
@@ -2308,11 +2455,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     const register_value: T = @truncate(self.getRegister(parsed.rs2));
                     std.mem.writeInt(T, &buffer, register_value, .little);
                     return_value = 0;
-                    self.bus.writeMemory(address, &buffer) catch |err| switch (err) {
-                        error.AccessFault => return TError { .LoadAccessFault = address },
-                        error.AlignmentFault => return TError { .LoadAddressMisaligned = address },
-                        error.PageFault => return TError { .LoadPageFault = address },
-                    };
+                    if (self.writeMemory(address, &buffer)) |err| return err;
                 }
             }
             self.setRegister(parsed.rd, return_value);

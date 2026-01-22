@@ -6,7 +6,7 @@ const AnyWriter = std.io.AnyWriter;
 const PrivilegeLevel = privilege.PrivilegeLevel;
 const SppPrivilegeLevel = privilege.SppPrivilegeLevel;
 
-const TranslationReason = enum {
+pub const TranslationReason = enum {
     Read,
     Write,
     Execute
@@ -16,6 +16,14 @@ pub const BusError = error {
     AlignmentFault,
     AccessFault,
     PageFault
+};
+
+pub const TranslationError = error {
+    CannotReadPageTableEntry,
+    InvalidPTE,
+    TranslationTooDeep,
+    DisallowedOperation,
+    MisalignedSuperpage,
 };
 
 const PlicContext = struct {
@@ -352,7 +360,7 @@ pub fn Paging(Tword: type) type {
             // }
         };
 
-        const PageTableEntry = packed struct {
+        pub const PageTableEntry = packed struct {
             const Self = @This();
 
             v: u1,
@@ -396,18 +404,40 @@ pub fn Paging(Tword: type) type {
                 };
             }
 
-            fn isValid(self: *Self) bool {
+            fn isValid(self: *const Self) bool {
                 // TODO: do proper validity check
                 return self.r != 0 or self.w != 0 or self.x != 0;
             }
         };
 
-        fn translateAddress(
-            bus: *Bus(Tword),
+        pub fn getPageTableEntries(
+            allocator: Allocator,
+            bus: *const Bus(Tword),
+            ppn: u44,
+        ) ![]struct {usize, PageTableEntry} {
+            var buffer: [@sizeOf(PageTableEntry)]u8 = undefined;
+            var result = std.ArrayList(struct {usize, PageTableEntry}).init(allocator);
+            const ppn_tword = @as(Tword, ppn) * @as(Tword, PAGESIZE);
+            for (0..(PAGESIZE/@sizeOf(PageTableEntry))) |i| {
+                const addr = ppn_tword + i * @sizeOf(PageTableEntry);
+                try bus.readMemory(
+                    addr, &buffer
+                );
+                const pte = std.mem.littleToNative(PageTableEntry, @bitCast(buffer));
+                // std.debug.print("Reading at 0x{x}: {any}\n", .{addr, pte});
+                if (pte.v != 0) {
+                    try result.append(.{i, pte});
+                }
+            }
+            return result.toOwnedSlice();
+        }
+
+        pub fn translateAddress(
+            bus: *const Bus(Tword),
             va: VirtualAddress,
             ppn: u44,
             translation_reason: TranslationReason
-        ) !Tword {
+        ) TranslationError!Tword {
             var a: Tword = @as(Tword, ppn) * @as(Tword, PAGESIZE);
             var i: usize = LEVELS - 1;
             var pte: PageTableEntry = undefined;
