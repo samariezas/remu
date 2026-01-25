@@ -26,18 +26,414 @@ pub const TranslationError = error {
     MisalignedSuperpage,
 };
 
+const INTERRUPT_COUNT: comptime_int = 1;
+const CONTEXT_COUNT: comptime_int = 2;
 const PlicContext = struct {
-    uart_interrupt_enabled: bool,
+    interrupt_claimed: bool,
     priority_threshold: u32,
+    interrupts_enabled: [INTERRUPT_COUNT]bool,
 };
 
 const InterruptConfig = struct {
     priority: u32,
+    pending: bool,
 };
 
 const PlicState = struct {
-    interrupts: [1]InterruptConfig,
-    contexts: [2]PlicContext,
+    _interrupts: [INTERRUPT_COUNT]InterruptConfig,
+    _contexts: [CONTEXT_COUNT]PlicContext,
+
+    fn getInterrupt(self: *PlicState, idx: usize) ?*InterruptConfig {
+        if (idx > 0 and idx <= self._interrupts.len) {
+            return &self._interrupts[idx - 1];
+        }
+        return null;
+    }
+
+    fn getContext(self: *PlicState, idx: usize) ?*PlicContext {
+        if (idx < self._contexts.len) {
+            return &self._contexts[idx];
+        }
+        return null;
+    }
+
+    fn getInterruptPriority(self: *PlicState, idx: usize) u32 {
+        if (self.getInterrupt(idx)) |interrupt| {
+            return interrupt.*.priority;
+        }
+        return 0;
+    }
+
+    fn setInterruptPriority(self: *PlicState, idx: usize, priority: u32) void {
+        if (self.getInterrupt(idx)) |interrupt| {
+            interrupt.*.priority = priority;
+        }
+    }
+
+    pub fn setInterruptPending(self: *PlicState, idx: usize) void {
+        if (self.getInterrupt(idx)) |interrupt| {
+            interrupt.*.pending = true;
+        }
+    }
+
+    fn isInterruptPending(self: *PlicState, idx: usize) bool {
+        if (self.getInterrupt(idx)) |interrupt| {
+            return interrupt.*.pending;
+        }
+        return false;
+    }
+
+    fn getInterruptPendingBits(self: *PlicState, first_idx: usize) u32 {
+        var retval: u32 = 0;
+        for (0..32) |i| {
+            const mask = @as(u32, 1) << @truncate(i);
+            if (self.isInterruptPending(first_idx + i)) {
+                retval |= mask;
+            }
+        }
+        return retval;
+    }
+
+    fn isInterruptEnabled(self: *PlicState, idx: usize, context: usize) bool {
+        if (idx == 0) return false;
+        if (self.getContext(context)) |ctx| {
+            const interrupt_idx = idx - 1;
+            if (interrupt_idx < ctx.interrupts_enabled.len) {
+                return ctx.interrupts_enabled[interrupt_idx];
+            }
+        }
+        return false;
+    }
+
+    fn setInterruptEnabled(self: *PlicState, idx: usize, context: usize, enabled: bool) void {
+        if (idx == 0) return;
+        if (self.getContext(context)) |ctx| {
+            const interrupt_idx = idx - 1;
+            if (interrupt_idx < ctx.interrupts_enabled.len) {
+                ctx.interrupts_enabled[interrupt_idx] = enabled;
+            }
+        }
+    }
+
+    fn getInterruptEnableBits(self: *PlicState, first_idx: usize, context: usize) u32 {
+        var retval: u32 = 0;
+        for (0..32) |i| {
+            const mask = @as(u32, 1) << @truncate(i);
+            if (self.isInterruptEnabled(first_idx + i, context)) {
+                retval |= mask;
+            }
+        }
+        return retval;
+    }
+
+    fn setInterruptEnableBits(self: *PlicState, first_idx: usize, context: usize, bits: u32) void {
+        for (0..32) |i| {
+            const mask = @as(u32, 1) << @truncate(i);
+            self.setInterruptEnabled(first_idx + i, context, (bits & mask) != 0);
+        }
+    }
+
+    fn getPriorityThreshold(self: *PlicState, context: usize) u32 {
+        if (self.getContext(context)) |ctx| {
+            return ctx.*.priority_threshold;
+        }
+        return 0;
+    }
+
+    fn setPriorityThreshold(self: *PlicState, context: usize, threshold: u32) void {
+        if (self.getContext(context)) |ctx| {
+            ctx.*.priority_threshold = threshold;
+        }
+    }
+
+    fn getClaim(self: *PlicState, context: usize) u32 {
+        if (context >= self._contexts.len) return 0;
+        if (self.getContext(context)) |ctx| {
+            var interrupt_to_claim: ?struct {
+                priority: u32,
+                index: u32
+            } = null;
+            for (ctx.*.interrupts_enabled, 0..) |enabled, i| {
+                const interrupt_idx: u32 = @truncate(i + 1);
+                if (!enabled) continue;
+                if (self.getInterrupt(interrupt_idx)) |interrupt| {
+                    var replace = false;
+                    if (interrupt_to_claim) |current_best| {
+                        if (interrupt.priority > current_best.priority) {
+                            replace = true;
+                        }
+                    } else {
+                        replace = true;
+                    }
+                    if (replace) {
+                        interrupt_to_claim = .{
+                            .priority = interrupt.priority,
+                            .index = interrupt_idx,
+                        };
+                    }
+                }
+            }
+            if (interrupt_to_claim) |claimed| {
+                self.getInterrupt(claimed.index).?.pending = false;
+                ctx.interrupt_claimed = true;
+                return claimed.index;
+            }
+        }
+        return 0;
+    }
+
+    fn setComplete(self: *PlicState, context: usize, id: usize) void {
+        if (self.getContext(context)) |ctx| {
+            if (self.isInterruptEnabled(id, context)) {
+                ctx.interrupt_claimed = false;
+            }
+        }
+    }
+
+    pub fn shouldTrap(self: *PlicState, context: usize) bool {
+        if (self.getContext(context)) |ctx| {
+            for (self._interrupts, 0..) |interrupt, i| {
+                if (ctx.interrupts_enabled[i] and
+                    interrupt.pending and
+                    interrupt.priority > ctx.priority_threshold) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn getWord(self: *PlicState, offset: u32) BusError!u32 {
+        const address_class = PlicAddressClass.classifyAddress(offset);
+        switch (address_class) {
+            .Misaligned => return BusError.AlignmentFault,
+            .Reserved => return BusError.AccessFault,
+
+            .InterruptPriority => |*class|
+                return self.getInterruptPriority(class.source),
+
+            .InterruptPending => |*class|
+                return self.getInterruptPendingBits(class.first_source),
+
+            .EnableBits => |*class|
+                return self.getInterruptEnableBits(class.first_source, class.context),
+
+            .PriorityThreshold => |*class|
+                return self.getPriorityThreshold(class.context),
+
+            .ClaimComplete => |*class|
+                return self.getClaim(class.context),
+        }
+    }
+
+    fn writeWord(self: *PlicState, offset: u32, word: u32) BusError!void {
+        const address_class = PlicAddressClass.classifyAddress(offset);
+        switch (address_class) {
+            .Misaligned => return BusError.AlignmentFault,
+            .Reserved => return BusError.AccessFault,
+
+            .InterruptPriority => |*class|
+                self.setInterruptPriority(class.source, word),
+
+            .InterruptPending =>
+                return BusError.AccessFault,
+
+            .EnableBits => |*class|
+                self.setInterruptEnableBits(class.first_source, class.context, word),
+
+            .PriorityThreshold => |*class|
+                return self.setPriorityThreshold(class.context, word),
+
+            .ClaimComplete => |*class|
+                return self.setComplete(class.context, word),
+        }
+    }
+};
+
+const PlicAddressClass = union(enum) {
+    Misaligned,
+    Reserved,
+
+    // priority for a source
+    InterruptPriority: struct {
+        source: u32,
+    },
+
+    // Pending bits [32*i; 32*(i+1))
+    InterruptPending: struct {
+        first_source: u32,
+    },
+
+    // Interrupt enable bits for specific context
+    // and sources [32*i; 32*(i+1))
+    EnableBits: struct {
+        context: u32,
+        first_source: u32,
+    },
+
+    // Priority threshold for a specific context
+    PriorityThreshold: struct {
+        context: u32,
+    },
+
+    // Claim/Complete for a specific context
+    ClaimComplete: struct {
+        context: u32,
+    },
+
+    fn classifyAddress(offset: u32) PlicAddressClass {
+        if (offset % 4 != 0) {
+            return .Misaligned;
+        }
+        if (offset >= 0x4 and offset <= 0xffc) {
+            return .{
+                .InterruptPriority = .{
+                    .source = @divExact(offset, 4),
+                }
+            };
+        }
+        if (offset >= 0x1000 and offset <= 0x107c) {
+            return .{
+                .InterruptPending = .{
+                    .first_source = (offset - 0x1000) * 8,
+                }
+            };
+        }
+        if (offset >= 0x2000 and offset <= 0x1f1ffc) {
+            const entry_num = @divExact(offset - 0x2000, 4);
+            const context = entry_num / 32;
+            const first_source = (entry_num % 32) * 32;
+            return .{
+                .EnableBits = .{
+                    .context = context,
+                    .first_source = first_source,
+                }
+            };
+        }
+        if (offset >= 0x200000 and offset <= 0x3fff004) {
+            const context = (offset - 0x200000) / 0x1000;
+            switch (offset % 0x1000) {
+                0 => return .{ .PriorityThreshold = .{ .context = context, } },
+                4 => return .{ .ClaimComplete = .{ .context = context, } },
+                else => {},
+            }
+        }
+        return .Reserved;
+    }
+};
+
+test "PLIC address classification" {
+    try testing.expectEqual(
+        PlicAddressClass { .InterruptPriority = .{ .source = 1, }, },
+        PlicAddressClass.classifyAddress(0x4)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .InterruptPriority = .{ .source = 1023, }, },
+        PlicAddressClass.classifyAddress(0xffc)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .InterruptPending = .{ .first_source = 0, }, },
+        PlicAddressClass.classifyAddress(0x1000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .InterruptPending = .{ .first_source = 992, }, },
+        PlicAddressClass.classifyAddress(0x107c)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .EnableBits = .{
+            .context = 0,
+            .first_source = 0,
+        }},
+        PlicAddressClass.classifyAddress(0x2000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .EnableBits = .{
+            .context = 0,
+            .first_source = 32,
+        }},
+        PlicAddressClass.classifyAddress(0x2004)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .EnableBits = .{
+            .context = 1,
+            .first_source = 0,
+        }},
+        PlicAddressClass.classifyAddress(0x2080)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .EnableBits = .{
+            .context = 1,
+            .first_source = 32,
+        }},
+        PlicAddressClass.classifyAddress(0x2084)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .EnableBits = .{
+            .context = 15871,
+            .first_source = 992,
+        }},
+        PlicAddressClass.classifyAddress(0x1f1ffc)
+    );
+    try testing.expectEqual(
+        .Reserved,
+        PlicAddressClass.classifyAddress(0x1ffffc)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .PriorityThreshold = .{
+            .context = 0,
+        }},
+        PlicAddressClass.classifyAddress(0x200000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .ClaimComplete = .{
+            .context = 0,
+        }},
+        PlicAddressClass.classifyAddress(0x200004)
+    );
+    try testing.expectEqual(
+        .Reserved,
+        PlicAddressClass.classifyAddress(0x200008)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .PriorityThreshold = .{
+            .context = 1,
+        }},
+        PlicAddressClass.classifyAddress(0x201000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .ClaimComplete = .{
+            .context = 1,
+        }},
+        PlicAddressClass.classifyAddress(0x201004)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .PriorityThreshold = .{
+            .context = 1,
+        }},
+        PlicAddressClass.classifyAddress(0x201000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .ClaimComplete = .{
+            .context = 1,
+        }},
+        PlicAddressClass.classifyAddress(0x201004)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .PriorityThreshold = .{
+            .context = 15871,
+        }},
+        PlicAddressClass.classifyAddress(0x3FFF000)
+    );
+    try testing.expectEqual(
+        PlicAddressClass { .ClaimComplete = .{
+            .context = 15871,
+        }},
+        PlicAddressClass.classifyAddress(0x3FFF004)
+    );
+}
+
+const SerialDevice = struct {
+    writer: AnyWriter,
 };
 
 fn BusDevice(comptime Tword: type) type {
@@ -49,11 +445,8 @@ fn BusDevice(comptime Tword: type) type {
                 allocator: Allocator,
                 data: []u8,
             },
-            serial: struct {
-                writer: AnyWriter,
-            },
-            // plic: PlicState,
-            plic: void,
+            serial: SerialDevice,
+            plic: PlicState,
         },
 
         const Self = @This();
@@ -99,7 +492,7 @@ fn BusDevice(comptime Tword: type) type {
             }
         }
 
-        fn readMemory(self: *const Self, offset: Tword, dest: []u8) BusError!void {
+        fn readMemory(self: *Self, offset: Tword, dest: []u8) BusError!void {
             const length: Tword = @intCast(dest.len);
             if (offset + length >= self.length) {
                 return error.AlignmentFault;
@@ -120,8 +513,13 @@ fn BusDevice(comptime Tword: type) type {
                         }
                     }
                 },
-                // TODO: implement
-                .plic => @memset(dest, 0),
+                .plic => |*plic| {
+                    if (dest.len != 4) return BusError.AlignmentFault;
+                    const word = std.mem.littleToNative(
+                        u32, try plic.getWord(@truncate(offset))
+                    );
+                    @memcpy(dest, std.mem.asBytes(&word));
+                },
             }
         }
 
@@ -142,7 +540,13 @@ fn BusDevice(comptime Tword: type) type {
                     }
                 },
                 // TODO: implement
-                .plic => { },
+                .plic => |*plic| {
+                    if (src.len != 4) return BusError.AlignmentFault;
+                    const word = std.mem.littleToNative(
+                        u32, std.mem.bytesAsValue(u32, src).*
+                    );
+                    try plic.writeWord(@truncate(offset), word);
+                },
             }
         }
     };
@@ -262,6 +666,26 @@ pub fn Bus(Tword: type) type {
             var bytes: [@sizeOf(Tword)]u8 = undefined;
             std.mem.writeInt(Tword, &bytes, word, LittleEndian);
             try self.writeMemory(address, &bytes);
+        }
+
+        pub fn findSerialDevice(self: *Self) ?*SerialDevice {
+            for (self.devices) |*dev| {
+                switch (dev.*.vtag) {
+                    .serial => |*ser| return ser,
+                    else => { },
+                }
+            }
+            return null;
+        }
+
+        pub fn findPlic(self: *Self) ?*PlicState {
+            for (self.devices) |*dev| {
+                switch (dev.*.vtag) {
+                    .plic => |*plic| return plic,
+                    else => { },
+                }
+            }
+            return null;
         }
     };
 }

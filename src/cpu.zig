@@ -771,6 +771,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 if (PrivilegeLevel.fromEncoding(new_mstatus.mpp)) |new_mpp| {
                     cpu.mpp = new_mpp;
                 }
+                cpu.mie = new_mstatus.mie != 0;
+                cpu.mpie = new_mstatus.mpie != 0;
             }
 
             fn handleRead(cpu: *const Self) Tword {
@@ -844,6 +846,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             fn handleWrite(cpu: *Self, value: Tword) void {
                 const new_sstatus: SStatusCSR = @bitCast(value);
                 cpu.spp = SppPrivilegeLevel.fromEncoding(new_sstatus.spp);
+                cpu.sie = new_sstatus.sie != 0;
+                cpu.spie = new_sstatus.spie != 0;
             }
 
             fn handleRead(cpu: *const Self) Tword {
@@ -1019,10 +1023,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("mideleg", 0x303, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("mnstatus",0x744, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("satp",    0x180, SatpCSR.handleWrite,         SatpCSR.handleRead),
+            CsrMapEntry.new("marchid", 0xf12, null,                        handleReadStub),
+            CsrMapEntry.new("mimpid",  0xf13, null,                        handleReadStub),
 
             // LINUX stubs
             // TODO: replace with non-stubs
             CsrMapEntry.new("scounteren",0x106, handleWriteStub,           handleReadStub),
+            CsrMapEntry.new("time",      0xc01, handleWriteStub,           handleReadStub),
         };
 
         fn debugPrint(self: *const Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
@@ -1160,6 +1167,20 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
+            if (self._bus.findSerialDevice()) |_| {
+                if (self._bus.findPlic()) |plic| {
+                    plic.setInterruptPending(1);
+                    const trap_m = plic.shouldTrap(0);
+                    const trap_s = plic.shouldTrap(1);
+                    if (trap_m and self.mie and ) {
+                        
+                    }
+                    if (plic.shouldTrap()) {
+                        
+                    }
+                }
+            }
+
             try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
             var instruction: u32 = undefined;
             if (self.getNextInstruction(&instruction)) |err| {
@@ -1192,9 +1213,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn tick(self: *Self) DebugPrintError!void {
-            if (self.pc == 0xffffffff80000160) {
+            // if (self.pc == 0xffffffff80000160) {
                 // _ = std.c.raise(std.c.SIG.TRAP);
-            }
+            // }
             if (self.gdb_connection) |*conn| {
                 const continue_running = conn.poll(@ptrCast(self)) catch @panic("IO error");
                 if (!continue_running) {
