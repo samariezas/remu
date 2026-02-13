@@ -480,6 +480,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         mscratch: Tword,
         sscratch: Tword,
 
+        meie: bool,
+
         memory_reservation: ?MemoryReservation,
         gdb_connection: ?gdb_server.GdbDebugServer(opt),
         
@@ -1164,19 +1166,46 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
+        fn interruptCanTrapToM(self: *Self, interrupt_id: Tword) bool {
+            // An interrupt `i` will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true:
+            // (a) either the current privilege mode is M and the MIE bit in the mstatus register is set,
+            // or the current privilege mode has less privilege than M-mode;
+            // (b) bit i is set in both mip and mie; and
+            // (c) if register mideleg exists, bit i is not set in mideleg.
+            return
+                ((self.current_privilege_level == .Machine and self.mie) or (self.current_privilege_level != .Machine)) and
+                (Self.checkMask(self.mie, interrupt_id)) and
+                (!Self.checkMask(self.mideleg, interrupt_id));
+        }
+
+        fn interruptCanTrapToS(self: *Self, interrupt_id: Tword) bool {
+            // An interrupt i will trap to S-mode if both of the following are true:
+            // (a) either the current privilege mode is S and the SIE bit in the sstatus register is set,
+            // or the current privilege mode has less privilege than S-mode; and
+            // (b) bit i is set in both sip and sie.
+            return
+                ((self.current_privilege_level == .Supervisor and self.sie) or (self.current_privilege_level == .User)) and
+                (Self.checkMask(self.sie, interrupt_id));
+        }
+
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
             if (self._bus.findSerialDevice()) |_| {
                 if (self._bus.findPlic()) |plic| {
-                    plic.setInterruptPending(1);
-                    const trap_m = plic.shouldTrap(0);
-                    const trap_s = plic.shouldTrap(1);
-                    if (trap_m and self.mie and ) {
-                        
+                    // take machine-level interrupt if possible
+                    // plic.setInterruptPending(1);
+                    // Machine-level external interrupt: context 0, id 11
+                    if (self.checkMask(self.mideleg, 11)) {
+                        if (self.interruptCanTrapToS(self, 11)) {
+
+                        }
+                    } else {
+                        if (self.interruptCanTrapToS(self, 11)) {
+                        }
                     }
-                    if (plic.shouldTrap()) {
-                        
+                    if (self.interruptCanTrapToM() and plic.shouldTrap(0)) {
+
                     }
                 }
             }
@@ -1229,6 +1258,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
+        fn checkMask(deleg: Tword, interrupt_id: Tword) bool {
+            const cause_small: u5 = @truncate(interrupt_id);
+            const do_delegation: bool = (deleg >> cause_small) & 1 == 1;
+            return do_delegation;
+        }
+
         fn trap_to_mmode(self: *Self, err: TError) void {
             self.mepc = self.pc;
             self.mcause = err.getCode();
@@ -1264,6 +1299,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn trap(self: *Self, err: TError) void {
+            // TODO: use same checkMask function
             const cause_small: u5 = @truncate(err.getCode());
             const do_delegation: bool = (self.medeleg >> cause_small) & 1 == 1;
             if (self.current_privilege_level != .Machine and do_delegation) {
