@@ -1196,7 +1196,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     // take machine-level interrupt if possible
                     // plic.setInterruptPending(1);
                     // Machine-level external interrupt: context 0, id 11
-                    if (self.checkMask(self.mideleg, 11)) {
+                    if (Self.checkMask(self.mideleg, 11)) {
                         if (self.interruptCanTrapToS(self, 11)) {
 
                         }
@@ -1434,6 +1434,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .sepc = 0,
                 .scause = 0,
                 .stval = 0,
+                .meie = false,
                 .current_privilege_level = .Machine,
                 .mpp = .User,
                 .spp = .User,

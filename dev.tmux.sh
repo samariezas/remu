@@ -2,6 +2,11 @@
 
 SESSION_NAME="remu"
 
+if tmux has-session -t "$SESSION_NAME"; then
+    echo "Session $SESSION_NAME already exists"
+    exit 1
+fi
+
 tmux new-session -d -s "$SESSION_NAME" -n "Editor"
 tmux send-keys -t "$SESSION_NAME:0" "nix develop ./devshells/default -c zsh" C-m
 tmux send-keys -t "$SESSION_NAME:0" "clear && nvim ." C-m
