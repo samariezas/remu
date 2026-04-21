@@ -28,6 +28,8 @@ pub const TranslationError = error {
 
 const INTERRUPT_COUNT: comptime_int = 1;
 const CONTEXT_COUNT: comptime_int = 2;
+const SERIAL_INTERRUPT_ID: comptime_int = 1;
+
 const PlicContext = struct {
     interrupt_claimed: bool,
     priority_threshold: u32,
@@ -73,6 +75,12 @@ const PlicState = struct {
     pub fn setInterruptPending(self: *PlicState, idx: usize) void {
         if (self.getInterrupt(idx)) |interrupt| {
             interrupt.*.pending = true;
+        }
+    }
+
+    pub fn clearInterruptPending(self: *PlicState, idx: usize) void {
+        if (self.getInterrupt(idx)) |interrupt| {
+            interrupt.*.pending = false;
         }
     }
 
@@ -157,6 +165,8 @@ const PlicState = struct {
                 const interrupt_idx: u32 = @truncate(i + 1);
                 if (!enabled) continue;
                 if (self.getInterrupt(interrupt_idx)) |interrupt| {
+                    if (!interrupt.pending) continue;
+                    if (interrupt.priority <= ctx.priority_threshold) continue;
                     var replace = false;
                     if (interrupt_to_claim) |current_best| {
                         if (interrupt.priority > current_best.priority) {
@@ -184,6 +194,7 @@ const PlicState = struct {
 
     fn setComplete(self: *PlicState, context: usize, id: usize) void {
         if (self.getContext(context)) |ctx| {
+            if (id == 0) return;
             if (self.isInterruptEnabled(id, context)) {
                 ctx.interrupt_claimed = false;
             }
@@ -434,6 +445,66 @@ test "PLIC address classification" {
 
 const SerialDevice = struct {
     writer: AnyWriter,
+
+    ier: u8, // Interrupt Enable Register
+    iir: u8, // Interrupt Identification Register (read-only view)
+    lcr: u8, // Line Control Register
+    mcr: u8, // Modem Control Register
+    lsr: u8, // Line Status Register
+    scr: u8, // Scratch Register
+    dll: u8, // Divisor latch low
+    dlm: u8, // Divisor latch high
+
+    const LCR_DLAB: u8 = 0x80;
+    const IER_ERBFI: u8 = 0x01;
+    const IER_ETBEI: u8 = 0x02;
+    const IIR_NO_INTERRUPT_PENDING: u8 = 0x01;
+    const IIR_THRE: u8 = 0x02;
+    const IIR_CTYPE_16550A: u8 = 0xC0;
+    const LSR_DR: u8 = 0x01;
+    const LSR_THRE: u8 = 0x20;
+    const LSR_TEMT: u8 = 0x40;
+
+    fn init(writer: AnyWriter) SerialDevice {
+        return .{
+            .writer = writer,
+            .ier = 0,
+            .iir = IIR_NO_INTERRUPT_PENDING | IIR_CTYPE_16550A,
+            .lcr = 0,
+            .mcr = 0,
+            .lsr = LSR_THRE | LSR_TEMT,
+            .scr = 0,
+            .dll = 0,
+            .dlm = 0,
+        };
+    }
+
+    fn dlab(self: *const SerialDevice) bool {
+        return (self.lcr & LCR_DLAB) != 0;
+    }
+
+    fn updateInterrupts(self: *SerialDevice, plic: ?*PlicState) void {
+        var pending = false;
+
+        // Write-only minimal ns16550 model:
+        // Generate THRE interrupt whenever THR is empty and ETBEI is enabled.
+        if ((self.ier & IER_ETBEI) != 0 and
+            (self.lsr & LSR_THRE) != 0)
+        {
+            self.iir = IIR_THRE | IIR_CTYPE_16550A;
+            pending = true;
+        } else {
+            self.iir = IIR_NO_INTERRUPT_PENDING | IIR_CTYPE_16550A;
+        }
+
+        if (plic) |p| {
+            if (pending) {
+                p.setInterruptPending(SERIAL_INTERRUPT_ID);
+            } else {
+                p.clearInterruptPending(SERIAL_INTERRUPT_ID);
+            }
+        }
+    }
 };
 
 fn BusDevice(comptime Tword: type) type {
@@ -468,9 +539,7 @@ fn BusDevice(comptime Tword: type) type {
             const retval = Self {
                 .start_address = start_address,
                 .length = 0x1000,
-                .vtag = .{ .serial = .{
-                    .writer = writer,
-                }},
+                .vtag = .{ .serial = SerialDevice.init(writer) },
             };
             return retval;
         }
@@ -479,7 +548,26 @@ fn BusDevice(comptime Tword: type) type {
             const retval = Self {
                 .start_address = start_address,
                 .length = 0x1000000,
-                .vtag = .{ .plic = undefined, },
+                .vtag = .{ .plic = .{
+                    ._interrupts = .{
+                        .{
+                            .priority = 0,
+                            .pending = false,
+                        },
+                    },
+                    ._contexts = .{
+                        .{
+                            .interrupt_claimed = false,
+                            .priority_threshold = 0,
+                            .interrupts_enabled = .{false} ** INTERRUPT_COUNT,
+                        },
+                        .{
+                            .interrupt_claimed = false,
+                            .priority_threshold = 0,
+                            .interrupts_enabled = .{false} ** INTERRUPT_COUNT,
+                        },
+                    },
+                }, },
             };
             return retval;
         }
@@ -505,11 +593,15 @@ fn BusDevice(comptime Tword: type) type {
                 .serial => {
                     for (0..dest.len) |i| {
                         const byte_offset = offset + i;
-                        if (byte_offset == 5) { // LSR
-                            // transmit buffer empty
-                            dest[i] = 0x20 | 0x40;
-                        } else {
-                            dest[i] = 0;
+                        switch (byte_offset) {
+                            0 => dest[i] = if (self.vtag.serial.dlab()) self.vtag.serial.dll else 0, // DLL or RBR
+                            1 => dest[i] = if (self.vtag.serial.dlab()) self.vtag.serial.dlm else self.vtag.serial.ier, // DLM or IER
+                            2 => dest[i] = self.vtag.serial.iir, // IIR
+                            3 => dest[i] = self.vtag.serial.lcr, // LCR
+                            4 => dest[i] = self.vtag.serial.mcr, // MCR
+                            5 => dest[i] = self.vtag.serial.lsr, // LSR
+                            7 => dest[i] = self.vtag.serial.scr, // SCR
+                            else => dest[i] = 0,
                         }
                     }
                 },
@@ -534,9 +626,37 @@ fn BusDevice(comptime Tword: type) type {
                     @memcpy(m.data[s_offset..(s_offset+src.len)], src);
                 },
                 .serial => |*s| {
-                    if (offset == 0) {
-                        const written = s.writer.write(&[_]u8{src[0]}) catch @panic("Serial device write failed");
-                        std.debug.assert(written == 1);
+                    for (src, 0..) |byte, i| {
+                        const byte_offset = offset + i;
+                        switch (byte_offset) {
+                            0 => {
+                                if (s.dlab()) {
+                                    s.dll = byte;
+                                } else {
+                                    // THR write: transmitter becomes busy, then immediately
+                                    // completes in this minimal model.
+                                    s.lsr &= ~(SerialDevice.LSR_THRE | SerialDevice.LSR_TEMT);
+                                    const written = s.writer.write(&[_]u8{byte}) catch @panic("Serial device write failed");
+                                    std.debug.assert(written == 1);
+                                    s.lsr |= SerialDevice.LSR_THRE | SerialDevice.LSR_TEMT;
+                                }
+                            },
+                            1 => {
+                                if (s.dlab()) {
+                                    s.dlm = byte;
+                                } else {
+                                    // Keep only RX and THRE enable bits in this minimal model.
+                                    s.ier = byte & (SerialDevice.IER_ERBFI | SerialDevice.IER_ETBEI);
+                                }
+                            },
+                            2 => {
+                                // FCR write: accept and ignore for now.
+                            },
+                            3 => s.lcr = byte,
+                            4 => s.mcr = byte,
+                            7 => s.scr = byte,
+                            else => { },
+                        }
                     }
                 },
                 // TODO: implement
@@ -642,6 +762,14 @@ pub fn Bus(Tword: type) type {
         pub fn readMemory(self: *const Self, address: Tword, dest: []u8) BusError!void {
             if (self.findDevice(address)) |dev| {
                 try dev.readMemory(address - dev.start_address, dest);
+                switch (dev.vtag) {
+                    .serial => |*serial| {
+                        const mutable_serial: *SerialDevice = @constCast(serial);
+                        const mutable_self: *Self = @constCast(self);
+                        mutable_serial.updateInterrupts(mutable_self.findPlic());
+                    },
+                    else => { },
+                }
             } else {
                 return error.AccessFault;
             }
@@ -656,6 +784,10 @@ pub fn Bus(Tword: type) type {
         pub fn writeMemory(self: *Self, address: Tword, src: []const u8) BusError!void {
             // TODO: do in a better way
             if (self.findDevice(address)) |dev| {
+                switch (dev.vtag) {
+                    .serial => |*serial| serial.updateInterrupts(self.findPlic()),
+                    else => { },
+                }
                 try dev.writeMemory(address - dev.start_address, src);
             } else {
                 return error.AccessFault;

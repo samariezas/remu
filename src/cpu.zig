@@ -349,19 +349,21 @@ pub fn TestResult(comptime Tword: type) type {
     };
 }
 
-// TODO: implement vectored mode=1
 const TrapMode = enum {
     Direct,
+    Vectored,
 
     fn getEncoding(self: TrapMode) u2 {
         switch (self) {
             .Direct => return 0,
+            .Vectored => return 0,
         }
     }
 
     fn fromEncoding(encoding: u2) ?TrapMode {
         switch (encoding) {
             0 => return .Direct,
+            1 => return .Vectored,
             else => return null,
         }
     }
@@ -449,6 +451,21 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pub const Tword = opt.getTword();
         const TError = ExecutionError(Tword);
 
+        const InterruptCause = enum(u5) {
+            supervisor_software = 1,
+            machine_software = 3,
+            supervisor_timer = 5,
+            machine_timer = 7,
+            supervisor_external = 9,
+            machine_external = 11,
+            local_counter_overflow = 13,
+        };
+
+        const PendingInterrupt = struct {
+            target: PrivilegeLevel,
+            cause: InterruptCause,
+        };
+
         allocator: Allocator,
         registers: [32]Tword,
         pc: Tword,
@@ -471,16 +488,17 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         current_privilege_level: PrivilegeLevel,
         mpp: PrivilegeLevel,
         spp: SppPrivilegeLevel,
-        mie: bool,
-        sie: bool,
+        mstatus_mie: bool,
+        sstatus_sie: bool,
         mpie: bool,
         spie: bool,
         
         medeleg: Tword,
+        mideleg: Tword,
+        mie_bits: Tword,
+        mip_bits: Tword,
         mscratch: Tword,
         sscratch: Tword,
-
-        meie: bool,
 
         memory_reservation: ?MemoryReservation,
         gdb_connection: ?gdb_server.GdbDebugServer(opt),
@@ -773,7 +791,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 if (PrivilegeLevel.fromEncoding(new_mstatus.mpp)) |new_mpp| {
                     cpu.mpp = new_mpp;
                 }
-                cpu.mie = new_mstatus.mie != 0;
+                cpu.mstatus_mie = new_mstatus.mie != 0;
                 cpu.mpie = new_mstatus.mpie != 0;
             }
 
@@ -789,8 +807,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .wpri5 = 0,
                     .wpri6 = 0,
 
-                    .sie = @intFromBool(cpu.sie),
-                    .mie = @intFromBool(cpu.mie),
+                    .sie = @intFromBool(cpu.sstatus_sie),
+                    .mie = @intFromBool(cpu.mstatus_mie),
                     .spie = @intFromBool(cpu.spie),
                     .ube = 0, // u-mode memory fetch endianness
                     .mpie = @intFromBool(cpu.mpie),
@@ -848,7 +866,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             fn handleWrite(cpu: *Self, value: Tword) void {
                 const new_sstatus: SStatusCSR = @bitCast(value);
                 cpu.spp = SppPrivilegeLevel.fromEncoding(new_sstatus.spp);
-                cpu.sie = new_sstatus.sie != 0;
+                cpu.sstatus_sie = new_sstatus.sie != 0;
                 cpu.spie = new_sstatus.spie != 0;
             }
 
@@ -865,7 +883,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .wpri6 = 0,
                     .wpri7 = 0,
 
-                    .sie = @intFromBool(cpu.sie),
+                    .sie = @intFromBool(cpu.sstatus_sie),
                     .spie = @intFromBool(cpu.spie),
                     .ube = 0, // u-mode memory fetch endianness
                     .spp = cpu.spp.getEncoding(),
@@ -928,6 +946,39 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleWriteMedeleg(cpu: *Self, value: Tword) void { cpu.medeleg = value & 0xfcb7ff; }
         fn handleReadMedeleg(cpu: *const Self) Tword { return cpu.medeleg; }
+
+        fn handleWriteMideleg(cpu: *Self, value: Tword) void { cpu.mideleg = value; }
+        fn handleReadMideleg(cpu: *const Self) Tword { return cpu.mideleg; }
+
+        fn handleWriteMie(cpu: *Self, value: Tword) void { cpu.mie_bits = value; }
+        fn handleReadMie(cpu: *const Self) Tword { return cpu.mie_bits; }
+
+        fn handleWriteMip(cpu: *Self, value: Tword) void {
+            // Keep this conservative for now: software can inject SSIP/MSIP and
+            // clear software-controlled pending bits. External/timer sources can
+            // overwrite these later via refreshPendingInterrupts().
+            const writable_mask =
+                (@as(Tword, 1) << @intFromEnum(InterruptCause.supervisor_software)) |
+                (@as(Tword, 1) << @intFromEnum(InterruptCause.machine_software));
+            cpu.mip_bits = (cpu.mip_bits & ~writable_mask) | (value & writable_mask);
+        }
+        fn handleReadMip(cpu: *const Self) Tword { return cpu.mip_bits; }
+
+        fn handleWriteSie(cpu: *Self, value: Tword) void {
+            const delegated_mask = cpu.mideleg;
+            cpu.mie_bits = (cpu.mie_bits & ~delegated_mask) | (value & delegated_mask);
+        }
+        fn handleReadSie(cpu: *const Self) Tword {
+            return cpu.mie_bits & cpu.mideleg;
+        }
+
+        fn handleWriteSip(cpu: *Self, value: Tword) void {
+            const writable_mask = (@as(Tword, 1) << @intFromEnum(InterruptCause.supervisor_software));
+            cpu.mip_bits = (cpu.mip_bits & ~writable_mask) | (value & writable_mask);
+        }
+        fn handleReadSip(cpu: *const Self) Tword {
+            return cpu.mip_bits & cpu.mideleg;
+        }
 
         fn handleWriteMscratch(cpu: *Self, value: Tword) void { cpu.mscratch = value; }
         fn handleWriteSscratch(cpu: *Self, value: Tword) void { cpu.sscratch = value; }
@@ -1018,11 +1069,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadZero),
             CsrMapEntry.new("pmpcfg0", 0x3a0, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("pmpaddr0",0x3b0, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("mie",     0x304, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("sie",     0x104, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("sip",     0x144, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("mip",     0x344, handleWriteStub,             handleReadStub),
-            CsrMapEntry.new("mideleg", 0x303, handleWriteStub,             handleReadStub),
+            CsrMapEntry.new("mie",     0x304, handleWriteMie,              handleReadMie),
+            CsrMapEntry.new("sie",     0x104, handleWriteSie,              handleReadSie),
+            CsrMapEntry.new("sip",     0x144, handleWriteSip,              handleReadSip),
+            CsrMapEntry.new("mip",     0x344, handleWriteMip,              handleReadMip),
+            CsrMapEntry.new("mideleg", 0x303, handleWriteMideleg,          handleReadMideleg),
             CsrMapEntry.new("mnstatus",0x744, handleWriteStub,             handleReadStub),
             CsrMapEntry.new("satp",    0x180, SatpCSR.handleWrite,         SatpCSR.handleRead),
             CsrMapEntry.new("marchid", 0xf12, null,                        handleReadStub),
@@ -1166,48 +1217,140 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
-        fn interruptCanTrapToM(self: *Self, interrupt_id: Tword) bool {
-            // An interrupt `i` will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true:
-            // (a) either the current privilege mode is M and the MIE bit in the mstatus register is set,
-            // or the current privilege mode has less privilege than M-mode;
-            // (b) bit i is set in both mip and mie; and
-            // (c) if register mideleg exists, bit i is not set in mideleg.
-            return
-                ((self.current_privilege_level == .Machine and self.mie) or (self.current_privilege_level != .Machine)) and
-                (Self.checkMask(self.mie, interrupt_id)) and
-                (!Self.checkMask(self.mideleg, interrupt_id));
+        fn interruptMask(cause: InterruptCause) Tword {
+            return @as(Tword, 1) << @intFromEnum(cause);
         }
 
-        fn interruptCanTrapToS(self: *Self, interrupt_id: Tword) bool {
-            // An interrupt i will trap to S-mode if both of the following are true:
-            // (a) either the current privilege mode is S and the SIE bit in the sstatus register is set,
-            // or the current privilege mode has less privilege than S-mode; and
-            // (b) bit i is set in both sip and sie.
-            return
-                ((self.current_privilege_level == .Supervisor and self.sie) or (self.current_privilege_level == .User)) and
-                (Self.checkMask(self.sie, interrupt_id));
+        fn interruptPending(self: *const Self, cause: InterruptCause) bool {
+            return (self.mip_bits & interruptMask(cause)) != 0;
+        }
+
+        fn interruptEnabled(self: *const Self, cause: InterruptCause) bool {
+            return (self.mie_bits & interruptMask(cause)) != 0;
+        }
+
+        fn setInterruptPending(self: *Self, cause: InterruptCause, pending: bool) void {
+            const mask = interruptMask(cause);
+            if (pending) {
+                self.mip_bits |= mask;
+            } else {
+                self.mip_bits &= ~mask;
+            }
+        }
+
+        fn isDelegatedToS(self: *const Self, cause: InterruptCause) bool {
+            return (self.mideleg & interruptMask(cause)) != 0;
+        }
+
+        fn refreshPendingInterrupts(self: *Self) void {
+            // Standard, controller-agnostic CPU view:
+            // external interrupt lines may be driven by a controller, but the CPU
+            // only consumes architectural pending bits.
+            if (self._bus.findPlic()) |plic| {
+                self.setInterruptPending(.machine_external, plic.shouldTrap(0));
+                self.setInterruptPending(.supervisor_external, plic.shouldTrap(1));
+            } else {
+                self.setInterruptPending(.machine_external, false);
+                self.setInterruptPending(.supervisor_external, false);
+            }
+        }
+
+        fn interruptCanTrapToM(self: *const Self, cause: InterruptCause) bool {
+            return ((self.current_privilege_level == .Machine and self.mstatus_mie) or
+                    (self.current_privilege_level != .Machine)) and
+                   self.interruptPending(cause) and
+                   self.interruptEnabled(cause) and
+                   !self.isDelegatedToS(cause);
+        }
+
+        fn interruptCanTrapToS(self: *const Self, cause: InterruptCause) bool {
+            return ((self.current_privilege_level == .Supervisor and self.sstatus_sie) or
+                    (self.current_privilege_level == .User)) and
+                   self.isDelegatedToS(cause) and
+                   self.interruptPending(cause) and
+                   self.interruptEnabled(cause);
+        }
+
+        fn selectPendingInterrupt(self: *Self) ?PendingInterrupt {
+            // M-mode destination priority
+            const m_priority = [_]InterruptCause{
+                .machine_external,
+                .machine_software,
+                .machine_timer,
+                .supervisor_external,
+                .supervisor_software,
+                .supervisor_timer,
+                .local_counter_overflow,
+            };
+            inline for (m_priority) |cause| {
+                if (self.interruptCanTrapToM(cause)) {
+                    return .{ .target = .Machine, .cause = cause };
+                }
+            }
+
+            // S-mode destination priority
+            const s_priority = [_]InterruptCause{
+                .supervisor_external,
+                .supervisor_software,
+                .supervisor_timer,
+                .local_counter_overflow,
+            };
+            inline for (s_priority) |cause| {
+                if (self.interruptCanTrapToS(cause)) {
+                    return .{ .target = .Supervisor, .cause = cause };
+                }
+            }
+
+            return null;
+        }
+
+        fn takeInterrupt(self: *Self, irq: PendingInterrupt) void {
+            const cause_code: Tword = @intFromEnum(irq.cause);
+            const interrupt_bit: Tword = @as(Tword, 1) << (@bitSizeOf(Tword) - 1);
+            const xcause: Tword = interrupt_bit | cause_code;
+
+            switch (irq.target) {
+                .Machine => {
+                    self.mepc = self.pc;
+                    self.mcause = xcause;
+                    self.mtval = 0;
+                    self.pc = switch (self.m_trap_mode) {
+                        .Direct => self.m_trap_handler_address,
+                        .Vectored => self.m_trap_handler_address + 4 * cause_code,
+                    };
+                    self.mpie = self.mstatus_mie;
+                    self.mstatus_mie = false;
+                    self.mpp = self.current_privilege_level;
+                    self.current_privilege_level = .Machine;
+                },
+                .Supervisor => {
+                    self.sepc = self.pc;
+                    self.scause = xcause;
+                    self.stval = 0;
+                    self.pc = switch (self.s_trap_mode) {
+                        .Direct => self.s_trap_handler_address,
+                        .Vectored => self.s_trap_handler_address + 4 * cause_code,
+                    };
+                    self.spie = self.sstatus_sie;
+                    self.sstatus_sie = false;
+                    self.spp = switch (self.current_privilege_level) {
+                        .Machine => unreachable,
+                        .User => .User,
+                        .Supervisor => .Supervisor,
+                    };
+                    self.current_privilege_level = .Supervisor;
+                },
+                .User => unreachable,
+            }
         }
 
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
-            if (self._bus.findSerialDevice()) |_| {
-                if (self._bus.findPlic()) |plic| {
-                    // take machine-level interrupt if possible
-                    // plic.setInterruptPending(1);
-                    // Machine-level external interrupt: context 0, id 11
-                    if (Self.checkMask(self.mideleg, 11)) {
-                        if (self.interruptCanTrapToS(self, 11)) {
-
-                        }
-                    } else {
-                        if (self.interruptCanTrapToS(self, 11)) {
-                        }
-                    }
-                    if (self.interruptCanTrapToM() and plic.shouldTrap(0)) {
-
-                    }
-                }
+            self.refreshPendingInterrupts();
+            if (self.selectPendingInterrupt()) |irq| {
+                self.takeInterrupt(irq);
+                return null;
             }
 
             try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
@@ -1272,9 +1415,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.mtval = 0;
             }
+            std.debug.assert(self.m_trap_mode == .Direct);
             self.pc = self.m_trap_handler_address;
-            self.mpie = self.mie;
-            self.mie = false;
+            self.mpie = self.mstatus_mie;
+            self.mstatus_mie = false;
             self.mpp = self.current_privilege_level;
             self.current_privilege_level = .Machine;
         }
@@ -1287,9 +1431,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.stval = 0;
             }
+            std.debug.assert(self.m_trap_mode == .Direct);
             self.pc = self.s_trap_handler_address;
-            self.spie = self.sie;
-            self.sie = false;
+            self.spie = self.sstatus_sie;
+            self.sstatus_sie = false;
             self.spp = switch (self.current_privilege_level) {
                 .Machine => unreachable,
                 .User => SppPrivilegeLevel.User,
@@ -1434,15 +1579,17 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .sepc = 0,
                 .scause = 0,
                 .stval = 0,
-                .meie = false,
                 .current_privilege_level = .Machine,
                 .mpp = .User,
                 .spp = .User,
-                .mie = false,
-                .sie = false,
+                .mstatus_mie = false,
+                .sstatus_sie = false,
                 .mpie = false,
                 .spie = false,
                 .medeleg = 0,
+                .mideleg = 0,
+                .mie_bits = 0,
+                .mip_bits = 0,
                 .mscratch = 0,
                 .sscratch = 0,
                 .memory_reservation = null,
@@ -2276,7 +2423,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleMret(self: *Self, _: u32) ?TError {
-            self.mie = self.mpie;
+            self.mstatus_mie = self.mpie;
             self.pc = self.mepc;
             // TODO: what is mprv?
             // if (self.mpp != .Machine) {
@@ -2289,7 +2436,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleSret(self: *Self, _: u32) ?TError {
-            self.sie = self.spie;
+            self.sstatus_sie = self.spie;
             self.pc = self.sepc;
             // TODO: is there sprv, like mprv?
             self.current_privilege_level = self.spp.toRegular();
