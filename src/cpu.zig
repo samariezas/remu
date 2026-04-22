@@ -507,6 +507,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         asid: u16,
         ppn: u44,
 
+        timer: std.time.Timer,
+
         const Instr = InstructionDescriptor(opt);
 
         fn shiftLen() type {
@@ -723,7 +725,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         const Tcsrid: type = u12;
         const CsrWriteHandler = *const fn (*Self, Tword) void;
-        const CsrReadHandler = *const fn (*const Self) Tword;
+        const CsrReadHandler = *const fn (*Self) Tword;
         const CsrMapEntry = struct {
             name: []const u8,
             id: Tcsrid,
@@ -1029,6 +1031,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return 0;
         }
 
+        fn handleReadTime(cpu: *Self) Tword {
+            // TODO: un-hardcode
+            const freq_hz: comptime_int = 10_000_000;
+            const elapsed_ns = @as(u128, cpu.timer.read());
+            const ticks_elapsed: Tword = @truncate((elapsed_ns * freq_hz) / std.time.ns_per_s);
+            return ticks_elapsed;
+        }
+
         fn handleReadMisa(_: *const Self) Tword {
             const parsed: packed struct {
                 a_extension: u1,
@@ -1117,7 +1127,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             // LINUX stubs
             // TODO: replace with non-stubs
             CsrMapEntry.new("scounteren",0x106, handleWriteStub,           handleReadStub),
-            CsrMapEntry.new("time",      0xc01, handleWriteStub,           handleReadStub),
+            CsrMapEntry.new("time",      0xc01, null,                      handleReadTime),
         };
 
         fn debugPrint(self: *const Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
@@ -1427,11 +1437,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn tick(self: *Self) DebugPrintError!void {
-            // if (self.pc == 0xffffffff80000160) {
-                // _ = std.c.raise(std.c.SIG.TRAP);
-            // }
             if (self.gdb_connection) |*conn| {
-                const continue_running = conn.poll(@ptrCast(self)) catch @panic("IO error");
+                const continue_running = conn.poll(self) catch @panic("IO error");
                 if (!continue_running) {
                     return;
                 }
@@ -1546,16 +1553,16 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return dest.len;
         }
 
-        fn debugGetCSRs(self: *const Self, allocator: Allocator) []gdb_server.CsrNameValuePair {
-            const result = allocator.alloc(gdb_server.CsrNameValuePair, Self.csr_map.len) catch @panic("Failed alloc");
-            for (0..csr_map.len) |i| {
-                result[i] = .{
-                    .name = csr_map[i].name,
-                    .value = csr_map[i].read_handler(self),
-                };
-            }
-            return result;
-        }
+        // fn debugGetCSRs(self: *Self, allocator: Allocator) []gdb_server.CsrNameValuePair {
+        //     const result = allocator.alloc(gdb_server.CsrNameValuePair, Self.csr_map.len) catch @panic("Failed alloc");
+        //     for (0..csr_map.len) |i| {
+        //         result[i] = .{
+        //             .name = csr_map[i].name,
+        //             .value = csr_map[i].read_handler(self),
+        //         };
+        //     }
+        //     return result;
+        // }
 
         fn debugGetPPN(self: *const Self) u44 {
             return self.ppn;
@@ -1581,7 +1588,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .readRegisters = Self.debugGetRegisters,
                 .getPc = Self.debugGetPc,
                 .readMemory = Self.debugReadMemory,
-                .getCsrs = Self.debugGetCSRs,
+                // .getCsrs = Self.debugGetCSRs,
                 .getPPN = Self.debugGetPPN,
                 .getPTEs = Self.debugGetPTEs,
                 .translateAddress = Self.debugTranslateAddress,
@@ -1649,6 +1656,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
+                .timer = try std.time.Timer.start(),
             };
         }
 

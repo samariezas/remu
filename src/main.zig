@@ -89,9 +89,10 @@ pub fn main() !u8 {
         };
         try tests.printResults(&results, raw_stdout_writer);
     } else if (std.mem.eql(u8, run_type, "full")) {
-        const path = args.next() orelse @panic("Missing path argument");
-        std.debug.assert(!args.skip());
-        try tests.runMultipleSuites(allocator, arena_allocator, path, raw_stdout_writer);
+        std.debug.assert(false);
+        // const path = args.next() orelse @panic("Missing path argument");
+        // std.debug.assert(!args.skip());
+        // try tests.runMultipleSuites(allocator, arena_allocator, path, raw_stdout_writer);
     } else if (std.mem.eql(u8, run_type, "spike")) {
         const image = args.next() orelse @panic("Missing image argument");
         std.debug.assert(!args.skip());

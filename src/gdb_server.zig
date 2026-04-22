@@ -137,7 +137,7 @@ pub fn DebugInterface(opt: CpuOptions) type {
         readRegisters: *const fn(*const RVCPU(opt)) [32]Tword,
         getPc: *const fn(*const RVCPU(opt)) Tword,
         readMemory: *const fn(*RVCPU(opt), Tword, []u8) Tword,
-        getCsrs: *const fn(*const RVCPU(opt), Allocator) []CsrNameValuePair,
+        // getCsrs: *const fn(*const RVCPU(opt), Allocator) []CsrNameValuePair,
         getPPN: *const fn(*const RVCPU(opt)) u44,
         getPTEs: *const fn(*RVCPU(opt), Allocator, ppn: u44) ?[]struct {usize, Paging(Tword).PageTableEntry},
         translateAddress: *const fn(*RVCPU(opt), virtual_address: Tword) ?Tword,
@@ -162,6 +162,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
         poller: std.io.Poller(PollStreams),
         cpu_state: CpuState,
         debug_interface: DebugInterface(opt),
+        tick: usize,
 
         pub fn init(allocator: Allocator, path: []const u8, debug_interface: DebugInterface(opt)) !Self {
             const socket_fd = try std.posix.socket(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
@@ -191,6 +192,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 ),
                 .cpu_state = .Paused,
                 .debug_interface = debug_interface,
+                .tick = 0,
             };
         }
 
@@ -227,6 +229,10 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 },
                 .Paused => { },
             }
+            self.tick = (self.tick + 1) % 4096;
+            if (self.tick != 0) {
+                return self.cpu_state;
+            }
             var buffer: [1024]u8 = undefined;
             const buffer_read = self.client.read(&buffer) catch |err| switch (err) {
                 error.WouldBlock => return self.cpu_state,
@@ -262,13 +268,13 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
         // TODO: verify checksums
         // TODO: holy shit...
         fn handlePacket(self: *Self, packet: *const Packet, cpu: *RVCPU(opt)) !void {
-            if (packet.dropped.len != 0) std.debug.print("W: dropped {} bytes of data: {s}\n", .{packet.dropped.len, packet.dropped});
+            // if (packet.dropped.len != 0) std.debug.print("W: dropped {} bytes of data: {s}\n", .{packet.dropped.len, packet.dropped});
 
             // const arena = std.heap.ArenaAllocator.init(self.allocator);
             // defer arena.deinit();
             // const allocator = arena.allocator();
 
-            std.debug.print("Packet: {s}\n", .{packet.payload});
+            // std.debug.print("Packet: {s}\n", .{packet.payload});
             if (std.mem.startsWith(u8, packet.payload, "qSupported")) {
                 try self.sendResponse("PacketSize=4000;swbreak-;hwbreak+;vContSupported");
             } else if (std.mem.startsWith(u8, packet.payload, "vCont?")) {
@@ -321,13 +327,14 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 }
                 var write_buffer = std.ArrayList(u8).init(self.allocator);
                 defer write_buffer.deinit();
-                if (std.mem.eql(u8, custom_payload, "csrs")) {
-                    const csrs = self.debug_interface.getCsrs(cpu, self.allocator);
-                    defer self.allocator.free(csrs);
-                    for (csrs) |csr| {
-                        printHex(&write_buffer, "{s}: {x}\n", .{csr.name, csr.value});
-                    }
-                } else if (std.mem.startsWith(u8, custom_payload, "mempages")) {
+                // if (std.mem.eql(u8, custom_payload, "csrs")) {
+                //     const csrs = self.debug_interface.getCsrs(cpu, self.allocator);
+                //     defer self.allocator.free(csrs);
+                //     for (csrs) |csr| {
+                //         printHex(&write_buffer, "{s}: {x}\n", .{csr.name, csr.value});
+                //     }
+                // } else if (std.mem.startsWith(u8, custom_payload, "mempages")) {
+                if (std.mem.startsWith(u8, custom_payload, "mempages")) {
                     var space_it = std.mem.splitScalar(u8, custom_payload, ' ');
                     _ = space_it.next();
                     const ppn_: ?u44 = if (space_it.next()) |ppn_str|
@@ -387,6 +394,10 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
 
         fn appendBreakpoint(self: *Self, addr: Tword) !void {
             try self.breakpoints.append(addr);
+            // std.debug.print("Breakpoint list:", .{});
+            // for (self.breakpoints.items) |brk| {
+            //     std.debug.print("Breakpoint {x}\n", .{brk});
+            // }
         }
 
         fn removeBreakpoint(self: *Self, addr: Tword) void {
@@ -407,7 +418,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
         }
 
         fn transmitMemory(self: *Self, addr: Tword, length: Tword, cpu: *RVCPU(opt)) !void {
-            std.debug.print("Reading: {x} bytes @{x}\n", .{length, addr});
+            // std.debug.print("Reading: {x} bytes @{x}\n", .{length, addr});
             const buffer = try self.allocator.alloc(u8, length);
             const output_buffer = try self.allocator.alloc(u8, length*2);
             defer {
@@ -420,8 +431,8 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
             try self.sendResponse(result);
         }
 
-        fn sendUnknown(self: *Self, packet: *const Packet) !void {
-            std.debug.print("W: unknown packet {s}\n", .{packet.payload});
+        fn sendUnknown(self: *Self, _: *const Packet) !void {
+            // std.debug.print("W: unknown packet {s}\n", .{packet.payload});
             return self.sendResponse("");
         }
 

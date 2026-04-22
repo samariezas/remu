@@ -4,7 +4,8 @@ rm -f gdb.sock
 
 USE_PERF=false
 ZIG_OPTIMIZATION_LEVEL="Debug"
-LAUNCH_GDB=false
+USE_HOST_GDB=false
+USE_REMOTE_GDB=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -14,16 +15,29 @@ for arg in "$@"; do
         --release)
             ZIG_OPTIMIZATION_LEVEL="ReleaseSafe"
         ;;
-        --gdb)
-            LAUNCH_GDB=true
+        --gdb-remote)
+            USE_REMOTE_GDB=true
+        ;;
+        --gdb-host)
+            USE_HOST_GDB=true
         ;;
         *)
             echo "Unknown argument: $arg" >&2
-            echo "Supported args: --perf, --release" >&2
+            echo "Supported args: --perf, --release, --gdb-remote, --gdb-host" >&2
             exit 1
         ;;
     esac
 done
+
+if $USE_PERF && $USE_HOST_GDB; then
+    echo "Using perf and host gdb? You sure?" >&2
+    exit 1
+fi
+
+if $USE_PERF && $USE_REMOTE_GDB; then
+    echo "Using perf and remote gdb? You sure?" >&2
+    exit 1
+fi
 
 IMAGE_BUILD_DIR="./image-build"
 GDB_SOCKET_FILE="${IMAGE_BUILD_DIR}/gdb.sock"
@@ -73,8 +87,12 @@ COMMAND+=(
     "${LINUX_LOCATION}/Image"
 )
 
-if $LAUNCH_GDB; then
+if $USE_REMOTE_GDB; then
     COMMAND+=("${GDB_SOCKET_FILE}")
 fi
 
-exec "${COMMAND[@]}"
+if $USE_HOST_GDB; then
+    exec gdb --args "${COMMAND[@]}"
+else
+    exec "${COMMAND[@]}"
+fi

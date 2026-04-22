@@ -24,7 +24,7 @@ pkgsCross.stdenv.mkDerivation {
   ]);
 
   configurePhase = ''
-    cp ${./configs/linux_minimal.config} ./.config
+    cp ${./configs/linux_minimal_defconfiged.config} ./.config
   '';
 
   preBuild = ''
