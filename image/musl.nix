@@ -10,6 +10,7 @@ pkgsCross.stdenv.mkDerivation {
 
   enableParallelBuilding = true;
 
+  # TODO: huh, Step?
   configureStep = ''
     CROSS_COMPILE=riscv64-unknown-linux-musl- ./configure \
         --prefix=$out \

@@ -8,4 +8,5 @@ rec {
     inherit pkgs;
     derivations = [ musl busybox ];
   };
+  opensbi = import ./opensbi.nix { inherit pkgsCross pkgs; };
 }

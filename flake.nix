@@ -28,6 +28,7 @@
       } // (with image; {
         image-linux = linux;
         image-initramfs = initramfs;
+        image-opensbi = opensbi;
       });
 
       devShells.${system} = {
