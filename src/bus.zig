@@ -207,6 +207,7 @@ const PlicState = struct {
                 if (ctx.interrupts_enabled[i] and
                     interrupt.pending and
                     interrupt.priority > ctx.priority_threshold) {
+                    std.debug.print("RETURNING SHOULD TRAP\n", .{});
                     return true;
                 }
             }
@@ -216,6 +217,7 @@ const PlicState = struct {
 
     fn getWord(self: *PlicState, offset: u32) BusError!u32 {
         const address_class = PlicAddressClass.classifyAddress(offset);
+        std.debug.print("Reading PLIC address with offset: {x}\n", .{offset});
         switch (address_class) {
             .Misaligned => return BusError.AlignmentFault,
             .Reserved => return BusError.AccessFault,
@@ -239,6 +241,7 @@ const PlicState = struct {
 
     fn writeWord(self: *PlicState, offset: u32, word: u32) BusError!void {
         const address_class = PlicAddressClass.classifyAddress(offset);
+        std.debug.print("Writing PLIC address with offset: {x}\n", .{offset});
         switch (address_class) {
             .Misaligned => return BusError.AlignmentFault,
             .Reserved => return BusError.AccessFault,
@@ -499,6 +502,7 @@ const SerialDevice = struct {
 
         if (plic) |p| {
             if (pending) {
+                std.debug.print("Writing SERIAL pending\n", .{});
                 p.setInterruptPending(SERIAL_INTERRUPT_ID);
             } else {
                 p.clearInterruptPending(SERIAL_INTERRUPT_ID);
@@ -759,14 +763,14 @@ pub fn Bus(Tword: type) type {
             return null;
         }
 
-        pub fn readMemory(self: *const Self, address: Tword, dest: []u8) BusError!void {
+        // TODO: refactor so that bus reading is const
+        // but now i cannot, as the PLIC belongs to the bus
+        pub fn readMemory(self: *Self, address: Tword, dest: []u8) BusError!void {
             if (self.findDevice(address)) |dev| {
                 try dev.readMemory(address - dev.start_address, dest);
                 switch (dev.vtag) {
                     .serial => |*serial| {
-                        const mutable_serial: *SerialDevice = @constCast(serial);
-                        const mutable_self: *Self = @constCast(self);
-                        mutable_serial.updateInterrupts(mutable_self.findPlic());
+                        serial.updateInterrupts(self.findPlic());
                     },
                     else => { },
                 }
@@ -968,7 +972,7 @@ pub fn Paging(Tword: type) type {
 
         pub fn getPageTableEntries(
             allocator: Allocator,
-            bus: *const Bus(Tword),
+            bus: *Bus(Tword),
             ppn: u44,
         ) ![]struct {usize, PageTableEntry} {
             var buffer: [@sizeOf(PageTableEntry)]u8 = undefined;
@@ -989,7 +993,7 @@ pub fn Paging(Tword: type) type {
         }
 
         pub fn translateAddress(
-            bus: *const Bus(Tword),
+            bus: *Bus(Tword),
             va: VirtualAddress,
             ppn: u44,
             translation_reason: TranslationReason

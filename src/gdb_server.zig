@@ -136,10 +136,11 @@ pub fn DebugInterface(opt: CpuOptions) type {
 
         readRegisters: *const fn(*const RVCPU(opt)) [32]Tword,
         getPc: *const fn(*const RVCPU(opt)) Tword,
-        readMemory: *const fn(*const RVCPU(opt), Tword, []u8) Tword,
+        readMemory: *const fn(*RVCPU(opt), Tword, []u8) Tword,
         getCsrs: *const fn(*const RVCPU(opt), Allocator) []CsrNameValuePair,
         getPPN: *const fn(*const RVCPU(opt)) u44,
-        getPTEs: *const fn(*const RVCPU(opt), Allocator, ppn: u44) ?[]struct {usize, Paging(Tword).PageTableEntry},
+        getPTEs: *const fn(*RVCPU(opt), Allocator, ppn: u44) ?[]struct {usize, Paging(Tword).PageTableEntry},
+        translateAddress: *const fn(*RVCPU(opt), virtual_address: Tword) ?Tword,
     };
 }
 
@@ -359,6 +360,22 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 } else if (std.mem.eql(u8, custom_payload, "step")) {
                     self.cpu_state = .SingleTick;
                     printHex(&write_buffer, "Doing single tick\n", .{});
+                } else if (std.mem.startsWith(u8, custom_payload, "translate")) {
+                    var space_it = std.mem.splitScalar(u8, custom_payload, ' ');
+                    _ = space_it.next();
+                    if (space_it.next()) |virtual_address| {
+                        if (std.fmt.parseInt(Tword, virtual_address, 16) catch null) |parsed| {
+                            if (self.debug_interface.translateAddress(cpu, parsed)) |translated| {
+                                printHex(&write_buffer, "Translated address: {x}\n", .{translated});
+                            } else {
+                                printHex(&write_buffer, "Cannot translate: {x}\n", .{parsed});
+                            }
+                        } else {
+                            printHex(&write_buffer, "Cannot parse address: {s}\n", .{virtual_address});
+                        }
+                    } else {
+                        printHex(&write_buffer, "No address provided\n", .{});
+                    }
                 } else {
                     printHex(&write_buffer, "Unknown command `{s}`\n", .{custom_payload});
                 }

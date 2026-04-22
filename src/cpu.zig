@@ -686,6 +686,41 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 Instr.makeF35("SC.D",      0b0101111, 0b011, 0b00011,  handleScD,  null),
             } else [_]Instr {});
 
+        fn lessThan(_: void, a: Instr, b: Instr) bool {
+            return a.opcode < b.opcode;
+        }
+
+        pub fn sortByOpcode(
+            comptime N: usize,
+            input: [N]Instr,
+        ) [N]InstructionDescriptor(opt) {
+            @setEvalBranchQuota(10000);
+            var out = input;
+            std.sort.pdq(Instr, out[0..], {}, lessThan);
+            return out;
+        }
+
+        pub fn groupByOpcode(
+            comptime N: usize,
+            sorted: [N]Instr,
+        ) [128][]const Instr {
+            var result: [128][]const Instr = undefined;
+
+            var pos: usize = 0;
+            var opcode: usize = 0;
+
+            while (opcode < 128) : (opcode += 1) {
+                const start = pos;
+                while (pos < sorted.len and sorted[pos].opcode == opcode) : (pos += 1) {}
+                result[opcode] = sorted[start..pos];
+            }
+
+            return result;
+        }
+            
+        const sorted_instructions = sortByOpcode(instructions.len, instructions);
+        const grouped_instructions = groupByOpcode(sorted_instructions.len, sorted_instructions);
+
         const Tcsrid: type = u12;
         const CsrWriteHandler = *const fn (*Self, Tword) void;
         const CsrReadHandler = *const fn (*const Self) Tword;
@@ -1137,7 +1172,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
-        fn translateAddress(self: *const Self, address: Tword, reason: bus.TranslationReason) TranslationResult {
+        fn translateAddress(self: *Self, address: Tword, reason: bus.TranslationReason) TranslationResult {
             var translated_address = address;
             if (self.paging_enabled and self.current_privilege_level != .Machine) {
                 translated_address = bus.Paging(Tword).translateAddress(
@@ -1155,7 +1190,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         // TODO: properly handle misaligned memory in here and writeMemory
         // TODO: maybe split out into byte reads/writes
-        fn readMemory(self: *const Self, address: Tword, dest: []u8, comptime reason: bus.TranslationReason) ?TError {
+        fn readMemory(self: *Self, address: Tword, dest: []u8, comptime reason: bus.TranslationReason) ?TError {
             switch (reason) {
                 .Execute,
                 .Read => {},
@@ -1344,6 +1379,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
         }
 
+        fn findMatchingInstruction(instruction_id: InstructionIdentifiers) ?*const Instr {
+            for (grouped_instructions[instruction_id.opcode]) |*i| {
+                if (matches(instruction_id, i)) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
@@ -1361,24 +1405,22 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             const instruction_id: InstructionIdentifiers = @bitCast(instruction);
             try self.debugPrint(" Instr=0x{x:0>8}\n", .{instruction});
             try self.debugPrint("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
-            for (instructions) |i| {
-                if (matches(instruction_id, &i)) {
-                    if (self.writer) |writer| {
-                        i.print(writer, instruction, self.pc) catch return error.WriteFailed;
-                    }
-                    const execution_error = i.handler(self, instruction);
-                    if (execution_error) |err| {
-                        return err;
-                    }
-                    if (self.writer) |writer| {
-                        self.writeRegisters(writer, 4) catch return error.WriteFailed;
-                    }
-                    if (i.advance_pc) {
-                        self.pc += 4;
-                    }
-                    try self.debugPrint("\n", .{});
-                    return null;
+            if (Self.findMatchingInstruction(instruction_id)) |i| {
+                if (self.writer) |writer| {
+                    i.print(writer, instruction, self.pc) catch return error.WriteFailed;
                 }
+                const execution_error = i.handler(self, instruction);
+                if (execution_error) |err| {
+                    return err;
+                }
+                if (self.writer) |writer| {
+                    self.writeRegisters(writer, 4) catch return error.WriteFailed;
+                }
+                if (i.advance_pc) {
+                    self.pc += 4;
+                }
+                try self.debugPrint("\n", .{});
+                return null;
             }
             try self.debugPrint("Caught illegal instruction!\n", .{});
             return TError { .IllegalInstruction = @intCast(instruction) };
@@ -1415,6 +1457,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.mtval = 0;
             }
+            // TODO: handle vectored
             std.debug.assert(self.m_trap_mode == .Direct);
             self.pc = self.m_trap_handler_address;
             self.mpie = self.mstatus_mie;
@@ -1431,6 +1474,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             } else {
                 self.stval = 0;
             }
+            // TODO: handle vectored
             std.debug.assert(self.m_trap_mode == .Direct);
             self.pc = self.s_trap_handler_address;
             self.spie = self.sstatus_sie;
@@ -1492,7 +1536,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return self.pc;
         }
 
-        fn debugReadMemory(self: *const Self, memory_start: Tword, dest: []u8) Tword {
+        fn debugReadMemory(self: *Self, memory_start: Tword, dest: []u8) Tword {
             for (0..dest.len) |i| {
                 var curr_byte: [1]u8 = undefined;
                 // TODO: returning a slice would be better
@@ -1517,12 +1561,19 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return self.ppn;
         }
 
-        fn debugGetPTEs(self: *const Self, allocator: Allocator, ppn: u44) ?[]struct {usize, bus.Paging(Tword).PageTableEntry} {
+        fn debugGetPTEs(self: *Self, allocator: Allocator, ppn: u44) ?[]struct {usize, bus.Paging(Tword).PageTableEntry} {
             return bus.Paging(Tword).getPageTableEntries(allocator, &self._bus, ppn)
                 catch |err| {
                     std.debug.print("Cannot read memory map: {any}", .{err});  
                     return null;
                 };
+        }
+
+        fn debugTranslateAddress(self: *Self, virtual_address: Tword) ?Tword {
+            switch (self.translateAddress(virtual_address, .Read)) {
+                .Err => return null,
+                .Ok => |r| return r,
+            }
         }
 
         fn makeDebugInterface() gdb_server.DebugInterface(opt) {
@@ -1533,6 +1584,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .getCsrs = Self.debugGetCSRs,
                 .getPPN = Self.debugGetPPN,
                 .getPTEs = Self.debugGetPTEs,
+                .translateAddress = Self.debugTranslateAddress,
             };
         }
 

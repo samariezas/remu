@@ -38,7 +38,10 @@ pkgsCross.stdenv.mkDerivation {
   '';
   
   installPhase = ''
-    cp ./arch/riscv/boot/Image $out
+    mkdir -p $out
+    cp ./arch/riscv/boot/Image $out/
+    cp ./vmlinux $out/
+    cp ./vmlinux.unstripped $out/
   '';
 
   dontFixup = true;
