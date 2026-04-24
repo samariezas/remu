@@ -20,10 +20,12 @@ pub const BusError = error {
 
 pub const TranslationError = error {
     CannotReadPageTableEntry,
+    CannotWritePageTableEntry,
     InvalidPTE,
     TranslationTooDeep,
     DisallowedOperation,
     MisalignedSuperpage,
+    NonCanonicalVirtualAddress,
 };
 
 const INTERRUPT_COUNT: comptime_int = 1;
@@ -845,6 +847,13 @@ pub fn Paging(Tword: type) type {
         const LEVELS: Tword = 3;
         const PAGESIZE: Tword = 4096;
         const PTESIZE: Tword = @sizeOf(Paging(Tword).PageTableEntry);
+
+        pub const AccessContext = struct {
+            privilege: PrivilegeLevel,
+            sum: bool,
+            mxr: bool,
+        };
+
         const VirtualAddress = packed struct {
             const Self = @This();
 
@@ -853,6 +862,13 @@ pub fn Paging(Tword: type) type {
             vpn1: u9,
             vpn2: u9,
             padding: u25,
+
+            fn isCanonical(self: *const Self) bool {
+                const raw: u64 = @bitCast(self.*);
+                const sign = (raw >> 38) & 1;
+                const upper = raw >> 39;
+                return if (sign == 0) upper == 0 else upper == ((@as(u64, 1) << 25) - 1);
+            }
 
             fn getVpnSmall(self: *const Self, i: usize) u9 {
                 switch (i) {
@@ -964,9 +980,17 @@ pub fn Paging(Tword: type) type {
                 };
             }
 
-            fn isValid(self: *const Self) bool {
-                // TODO: do proper validity check
-                return self.r != 0 or self.w != 0 or self.x != 0;
+             fn isValid(self: *const Self) bool {
+                return self.v != 0 and !(self.r == 0 and self.w == 1);
+            }
+
+            fn isLeaf(self: *const Self) bool {
+                return self.r != 0 or self.x != 0;
+            }
+
+            fn hasReservedBitsSet(self: *const Self) bool {
+                // This emulator does not implement Svnapot/Svpbmt/Svrsw60t59b yet.
+                return self.n != 0 or self.pbmt != 0 or self.reserved != 0;
             }
         };
 
@@ -996,44 +1020,49 @@ pub fn Paging(Tword: type) type {
             bus: *Bus(Tword),
             va: VirtualAddress,
             ppn: u44,
-            translation_reason: TranslationReason
+            translation_reason: TranslationReason,
+            access_ctx: AccessContext,
         ) TranslationError!Tword {
+            if (!va.isCanonical()) return error.NonCanonicalVirtualAddress;
+
             var a: Tword = @as(Tword, ppn) * @as(Tword, PAGESIZE);
             var i: usize = LEVELS - 1;
             var pte: PageTableEntry = undefined;
             var pa = std.mem.zeroes(PhysicalAddress);
+            var pte_addr: Tword = undefined;
             while (true) {
                 var buffer: [@sizeOf(PageTableEntry)]u8 = undefined;
                 const address_to_read = a + va.getVpn(i) * @sizeOf(PageTableEntry);
+                pte_addr = address_to_read;
                 bus.readMemory(
                     address_to_read,
                     &buffer
                 ) catch return error.CannotReadPageTableEntry;
-                // TODO: should raise correct errors
-                // ) catch |err| {
-                    // switch (err) {
-                    //     error.OutOfBounds => unreachable,
-                    //     error.BusDeviceNotFound => unreachable,
-                    //     error.CannotReadSerialBlock => unreachable,
-                    // }
-                // };
                 pte = std.mem.littleToNative(PageTableEntry, @bitCast(buffer));
-                // TODO: check reserved bits in PTE
-                if (pte.v == 0 // pte is invalid
-                    or (pte.r == 0 and pte.w == 1)) // reserved for future use
-                {
+                if (!pte.isValid() or pte.hasReservedBitsSet()) {
                     return error.InvalidPTE;
                 }
-                if (pte.r == 1 or pte.x == 1) {
+                if (pte.isLeaf()) {
                     break;
                 }
                 if (i == 0) return error.TranslationTooDeep;
                 i -= 1;
                 a = pte.ppn.getFull() * PAGESIZE;
             }
+
+            const is_user_page = pte.u != 0;
+            switch (access_ctx.privilege) {
+                .User => if (!is_user_page) return error.DisallowedOperation,
+                .Supervisor => {
+                    if (is_user_page and translation_reason == .Execute) return error.DisallowedOperation;
+                    if (is_user_page and !access_ctx.sum) return error.DisallowedOperation;
+                },
+                .Machine => {},
+            }
+
             switch (translation_reason) {
                 .Read => {
-                    if (pte.r == 0) {
+                    if (pte.r == 0 and !(access_ctx.mxr and pte.x != 0)) {
                         return error.DisallowedOperation;
                     }
                 },
@@ -1051,6 +1080,15 @@ pub fn Paging(Tword: type) type {
             // TODO: check for misaligned superpages
             // TODO: handle priv levels
             // TODO: step 9
+
+            if (pte.a == 0 or (translation_reason == .Write and pte.d == 0)) {
+                pte.a = 1;
+                if (translation_reason == .Write) pte.d = 1;
+                var updated: [@sizeOf(PageTableEntry)]u8 = undefined;
+                std.mem.writeInt(u64, &updated, @bitCast(pte), .little);
+                bus.writeMemory(pte_addr, &updated) catch return error.CannotWritePageTableEntry;
+            }
+
             pa.page_offset = va.page_offset;
             var new_ppn = pte.ppn;
             for (0..i) |j| {

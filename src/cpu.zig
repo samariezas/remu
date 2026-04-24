@@ -492,6 +492,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         sstatus_sie: bool,
         mpie: bool,
         spie: bool,
+        mstatus_sum: bool,
+        mstatus_mxr: bool,
         
         medeleg: Tword,
         mideleg: Tword,
@@ -855,8 +857,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .fs = 0,
                     .xs = 0,
                     .mprv = 0, // TODO: implement!
-                    .sum = 0, // TODO: implement!
-                    .mxr = 0, // TODO: implement!
+                    .sum = @intFromBool(cpu.mstatus_sum),
+                    .mxr = @intFromBool(cpu.mstatus_mxr),
                     .tvm = 0, // TODO: implement! satp CSR
                     .tw = 0, // TODO: implement! WFI
                     .tsr = 0, // TODO: implement, SRET for S-mode
@@ -905,6 +907,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 cpu.spp = SppPrivilegeLevel.fromEncoding(new_sstatus.spp);
                 cpu.sstatus_sie = new_sstatus.sie != 0;
                 cpu.spie = new_sstatus.spie != 0;
+                cpu.mstatus_sum = new_sstatus.sum != 0;
+                cpu.mstatus_mxr = new_sstatus.mxr != 0;
             }
 
             fn handleRead(cpu: *const Self) Tword {
@@ -928,8 +932,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .fs = 0,
                     .xs = 0,
                     .mprv = 0, // TODO: implement!
-                    .sum = 0, // TODO: implement!
-                    .mxr = 0, // TODO: implement!
+                    .sum = @intFromBool(cpu.mstatus_sum),
+                    .mxr = @intFromBool(cpu.mstatus_mxr),
                     .spelp = 0, // TODO: wtf is this?
                     .sdt = 0, // TODO: double trap
                     .uxl = 2,   // 64bit in u-mode
@@ -1154,11 +1158,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn mapTranslationError(address: Tword, err: (bus.TranslationError || bus.BusError), reason: bus.TranslationReason) TError {
             // TODO: check if these exceptions are correct
             switch (err) {
-                error.CannotReadPageTableEntry,
                 error.InvalidPTE,
                 error.TranslationTooDeep,
                 error.DisallowedOperation,
                 error.MisalignedSuperpage,
+                error.NonCanonicalVirtualAddress,
                 error.PageFault,
                     => return switch (reason) {
                         .Read => TError { .LoadPageFault = address, },
@@ -1166,6 +1170,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                         .Execute => TError { .InstructionPageFault = address, },
                     },
 
+                error.CannotReadPageTableEntry,
+                error.CannotWritePageTableEntry,
                 error.AccessFault
                     => return switch (reason) {
                         .Read => TError { .LoadAccessFault = address, },
@@ -1189,7 +1195,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     &self._bus,
                     @bitCast(address),
                     self.ppn,
-                    reason
+                    reason,
+                    .{
+                        .privilege = self.current_privilege_level,
+                        .sum = self.mstatus_sum,
+                        .mxr = self.mstatus_mxr,
+                    }
                 ) catch |err|
                     return .{ .Err = mapTranslationError(address, err, reason), };
             }
@@ -1446,6 +1457,15 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
                 std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
+                switch (err) {
+                    .EcallFromU => {
+                        std.debug.print("Syscall = {} (0x{x})\n", .{
+                            self.getRegister(17),
+                            self.getRegister(17)
+                        });
+                    },
+                    else => {},
+                }
                 self.trap(err);
             }
         }
@@ -1662,6 +1682,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .sstatus_sie = false,
                 .mpie = false,
                 .spie = false,
+                .mstatus_sum = false,
+                .mstatus_mxr = false,
                 .medeleg = 0,
                 .mideleg = 0,
                 .mie_bits = 0,
