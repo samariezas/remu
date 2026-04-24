@@ -511,11 +511,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         asid: u16,
         ppn: u44,
 
-        timer: std.time.Timer,
-
-        // emulating SBI
-        sbi_timer_compare: Tword,
-
         const Instr = InstructionDescriptor(opt);
 
         fn shiftLen() type {
@@ -1046,16 +1041,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return 0;
         }
 
-        fn currentTime(cpu: *Self) Tword {
-            // TODO: un-hardcode
-            const freq_hz: comptime_int = 10_000_000;
-            const elapsed_ns = @as(u128, cpu.timer.read());
-            const ticks_elapsed: Tword = @truncate((elapsed_ns * freq_hz) / std.time.ns_per_s);
-            return ticks_elapsed;
-        }
-
         fn handleReadTime(cpu: *Self) Tword {
-            return cpu.currentTime();
+            return @truncate(cpu._bus.findClint().?.getMtime());
         }
 
         fn handleReadMisa(_: *const Self) Tword {
@@ -1315,6 +1302,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn refreshPendingInterrupts(self: *Self) void {
+            if (self._bus.findClint()) |clint| {
+                self.setInterruptPending(
+                    .machine_timer,
+                    clint.shouldInterrupt()
+                );
+            }
+
             // Standard, controller-agnostic CPU view:
             // external interrupt lines may be driven by a controller, but the CPU
             // only consumes architectural pending bits.
@@ -1325,12 +1319,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 self.setInterruptPending(.machine_external, false);
                 self.setInterruptPending(.supervisor_external, false);
             }
-
-            self.setInterruptPending(
-                .supervisor_timer,
-                self.sbi_timer_compare != std.math.maxInt(Tword) and
-                    self.currentTime() >= self.sbi_timer_compare,
-            );
         }
 
         fn interruptCanTrapToM(self: *const Self, cause: InterruptCause) bool {
@@ -1719,8 +1707,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
-                .timer = try std.time.Timer.start(),
-                .sbi_timer_compare = std.math.maxInt(Tword),
             };
         }
 
@@ -2261,57 +2247,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
-        fn sbiReturn(self: *Self, err: Tword, value: Tword) void {
-            self.setRegister(10, err);
-            self.setRegister(11, value);
-            self.pc += 4;
-        }
-
-        fn handleSbiEcall(self: *Self) bool {
-            const SBI_SUCCESS: Tword = 0;
-            const SBI_ERR_NOT_SUPPORTED: Tword = @bitCast(@as(toSigned(Tword), -2));
-            const SBI_EXT_BASE: Tword = 0x10;
-            const SBI_EXT_TIME: Tword = 0x54494D45;
-
-            const extension = self.getRegister(17);
-            const function = self.getRegister(16);
-
-            if (extension == 0) {
-                self.sbi_timer_compare = self.getRegister(10);
-                self.setInterruptPending(.supervisor_timer, false);
-                self.pc += 4;
-                return true;
-            }
-
-            if (extension == SBI_EXT_TIME and function == 0) {
-                self.sbi_timer_compare = self.getRegister(10);
-                self.setInterruptPending(.supervisor_timer, false);
-                self.sbiReturn(SBI_SUCCESS, 0);
-                return true;
-            }
-
-            if (extension == SBI_EXT_BASE) {
-                switch (function) {
-                    0 => self.sbiReturn(SBI_SUCCESS, 2),       // SBI spec v0.2
-                    1 => self.sbiReturn(SBI_SUCCESS, 0),       // implementation id
-                    2 => self.sbiReturn(SBI_SUCCESS, 0),       // implementation version
-                    3 => { // probe_extension(extid in a0)
-                        const extid = self.getRegister(10);
-                        self.sbiReturn(SBI_SUCCESS, if (extid == SBI_EXT_TIME) 1 else 0);
-                    },
-                    4, 5, 6 => self.sbiReturn(SBI_SUCCESS, 0), // mvendorid/marchid/mimpid
-                    else => self.sbiReturn(SBI_ERR_NOT_SUPPORTED, 0),
-                }
-                return true;
-            }
-
-            return false;
-        }
-
         fn handleEcall(self: *Self, _: u32) ?TError {
-            if (self.current_privilege_level == .Supervisor and self.handleSbiEcall()) {
-                return null;
-            }
             return switch (self.current_privilege_level) {
                 .User => TError.EcallFromU,
                 .Supervisor => TError.EcallFromS,

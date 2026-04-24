@@ -512,6 +512,41 @@ const SerialDevice = struct {
     }
 };
 
+const ClintState = struct {
+    const Self = @This();
+
+    timer: std.time.Timer,
+    interrupts_enabled: bool,
+    mtimecmp: u64,
+
+    fn init() !Self {
+        return .{
+            .timer = try std.time.Timer.start(),
+            .interrupts_enabled = false,
+            .mtimecmp = 0,
+        };
+    }
+
+    fn getMsip(self: *const Self) u32 {
+        return @intFromBool(self.interrupts_enabled);
+    }
+
+    fn writeMsip(self: *Self, value: u32) void {
+        self.interrupts_enabled = (value & 1) != 0;
+    }
+
+    pub fn getMtime(self: *Self) u64 {
+        // TODO: un-hardcode
+        const freq_hz: comptime_int = 10_000_000;
+        const elapsed_ns = @as(u128, self.timer.read());
+        return @truncate((elapsed_ns * freq_hz) / std.time.ns_per_s);
+    }
+
+    pub fn shouldInterrupt(self: *Self) bool {
+        return self.getMtime() > self.mtimecmp;
+    }
+};
+
 fn BusDevice(comptime Tword: type) type {
     return struct {
         start_address: Tword,
@@ -523,6 +558,7 @@ fn BusDevice(comptime Tword: type) type {
             },
             serial: SerialDevice,
             plic: PlicState,
+            clint: ClintState,
         },
 
         const Self = @This();
@@ -545,6 +581,15 @@ fn BusDevice(comptime Tword: type) type {
                 .start_address = start_address,
                 .length = 0x1000,
                 .vtag = .{ .serial = SerialDevice.init(writer) },
+            };
+            return retval;
+        }
+
+        fn initClint(start_address: Tword) Self {
+            const retval = Self {
+                .start_address = start_address,
+                .length = 0x1_0000,
+                .vtag = .{ .clint = ClintState.init() catch @panic("Cannot init CLINT"), },
             };
             return retval;
         }
@@ -582,6 +627,7 @@ fn BusDevice(comptime Tword: type) type {
                 .memory => |*m| { m.*.allocator.free(m.*.data); },
                 .serial => { },
                 .plic => { },
+                .clint => { },
             }
         }
 
@@ -616,6 +662,21 @@ fn BusDevice(comptime Tword: type) type {
                         u32, try plic.getWord(@truncate(offset))
                     );
                     @memcpy(dest, std.mem.asBytes(&word));
+                },
+                .clint => |*clint| {
+                    if (offset == 0x0 and dest.len == 4) {
+                        const retval: u32 = clint.getMsip();
+                        @memcpy(dest, std.mem.asBytes(&retval));
+                    } else if (offset == 0x4000 and dest.len == 8) {
+                        const retval: u64 = clint.mtimecmp;
+                        @memcpy(dest, std.mem.asBytes(&retval));
+                    } else if (offset == 0xbff8 and dest.len == 8) {
+                        const retval: u64 = clint.getMtime();
+                        @memcpy(dest, std.mem.asBytes(&retval));
+                    } else {
+                        std.debug.print("W: access fault on CLINT\n", .{});
+                        return error.AccessFault;
+                    }
                 },
             }
         }
@@ -672,6 +733,19 @@ fn BusDevice(comptime Tword: type) type {
                     );
                     try plic.writeWord(@truncate(offset), word);
                 },
+                .clint => |*clint| {
+                    if (offset == 0x0 and src.len == 4) {
+                        clint.writeMsip(std.mem.readInt(u32, @ptrCast(src), .little));
+                    } else if (offset == 0x4000 and src.len == 8) {
+                        clint.mtimecmp = std.mem.readInt(u64, @ptrCast(src), .little);
+                    } else if (offset == 0xbff8 and src.len == 8) {
+                        // not implemented...
+                        std.debug.assert(false);
+                    } else {
+                        std.debug.print("W: access fault on CLINT\n", .{});
+                        return error.AccessFault;
+                    }
+                },
             }
         }
     };
@@ -689,6 +763,9 @@ pub fn BusDeviceConfig(Tword: type) type {
             output_device: AnyWriter,
         },
         plic: struct {
+            start: Tword
+        },
+        clint: struct {
             start: Tword
         },
 
@@ -711,12 +788,19 @@ pub fn BusDeviceConfig(Tword: type) type {
                 .start = address_start,
             }};
         }
+
+        pub fn makeClint(address_start: Tword) Self {
+            return .{ .clint = .{
+                .start = address_start,
+            }};
+        }
         
         fn buildDevice(self: *const Self, allocator: Allocator) !BusDevice(Tword) {
             return switch (self.*) {
                 .memory => |*m| try BusDevice(Tword).initMemory(allocator, m.start, m.length),
                 .serial => |*s| BusDevice(Tword).initSerial(s.start, s.output_device),
                 .plic => |*p| BusDevice(Tword).initPlic(p.start),
+                .clint => |*p| BusDevice(Tword).initClint(p.start),
             };
         }
     };
@@ -790,11 +874,11 @@ pub fn Bus(Tword: type) type {
         pub fn writeMemory(self: *Self, address: Tword, src: []const u8) BusError!void {
             // TODO: do in a better way
             if (self.findDevice(address)) |dev| {
+                try dev.writeMemory(address - dev.start_address, src);
                 switch (dev.vtag) {
                     .serial => |*serial| serial.updateInterrupts(self.findPlic()),
                     else => { },
                 }
-                try dev.writeMemory(address - dev.start_address, src);
             } else {
                 return error.AccessFault;
             }
@@ -810,6 +894,16 @@ pub fn Bus(Tword: type) type {
             for (self.devices) |*dev| {
                 switch (dev.*.vtag) {
                     .serial => |*ser| return ser,
+                    else => { },
+                }
+            }
+            return null;
+        }
+
+        pub fn findClint(self: *Self) ?*ClintState {
+            for (self.devices) |*dev| {
+                switch (dev.*.vtag) {
+                    .clint => |*clint| return clint,
                     else => { },
                 }
             }

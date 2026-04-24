@@ -59,5 +59,10 @@
       reg-shift = <0x0>;
       reg-io-width = <0x1>;
     };
+    CLINT: clint@2000000 {
+      compatible = "riscv,clint0";
+      interrupts-extended = <&CPU0_intc 3 &CPU0_intc 7>;
+      reg = <0x0 0x02000000 0x0 0x00010000>;
+    };
   };
 };

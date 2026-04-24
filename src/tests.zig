@@ -348,6 +348,7 @@ pub fn runRemuBinary(
             BusCfg.makeMemory(initrd_start,     64*1024*1024),  // 64M  for initrd
             BusCfg.makeMemory(dtb_start,        8*1024*1024),   // 8M   for DTB, FwDynamicInfo
             BusCfg.makeSerial(0x1000_0000, serial_writer),
+            BusCfg.makeClint(0x200_0000),
             BusCfg.makePlic(0xc00_0000),
         },
     );
