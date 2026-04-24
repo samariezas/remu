@@ -1613,13 +1613,30 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 serial_device,
                 plic_device,
             });
+            return Self.initWithBus(
+                allocator,
+                entrypoint,
+                cpu_bus,
+                writer,
+                signature_info,
+                debugger_filepath
+            );
+        }
+
+        pub fn initWithBus(
+            allocator: Allocator,
+            entrypoint: Tword,
+            cpu_bus: Bus(Tword),
+            writer: ?std.io.AnyWriter,
+            signature_info: ?SignatureInfo,
+            debugger_filepath: ?[]const u8,
+        ) !RVCPU(opt) {
             const gdb_connection = if (debugger_filepath) |debugger_path|
                 try gdb_server.GdbDebugServer(opt).init(
                     allocator,
                     debugger_path,
                     Self.makeDebugInterface()
-                )
-            else null;
+                ) else null;
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),

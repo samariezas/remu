@@ -1,5 +1,6 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
+const bus = @import("bus.zig");
 const libelf = @import("libelf.zig");
 const cpu_config = cpu.cpu_config;
 const fs = std.fs;
@@ -292,12 +293,33 @@ fn alignOnPage(T: type, i: *T) void {
     i.* = new_value;
 }
 
+fn loadImage(
+    comptime opt: CpuOptions,
+    allocator: Allocator,
+    rvcpu: *cpu.RVCPU(opt),
+    image: []const u8,
+    current_location: opt.getTword(),
+) !opt.getTword() {
+    const MAX_FILESIZE = 32*1024*1024;
+    const Tword = opt.getTword();
+    const image_data = try std.fs.cwd().readFileAlloc(
+        allocator, image, MAX_FILESIZE
+    );
+    defer allocator.free(image_data);
+    try rvcpu.loadData(current_location, image_data);
+    var end_address = current_location + image_data.len;
+    alignOnPage(Tword, &end_address);
+    return end_address;
+}
+
+// TODO: read OpenSBI as ELF
 pub fn runRemuBinary(
     comptime opt: CpuOptions,
     allocator: Allocator,
-    image_path: []const u8,
+    opensbi_path: []const u8,
     dtb_path: []const u8,
     kernel_path: []const u8,
+    initrd_path: []const u8,
     debug_writer: ?std.io.AnyWriter,
     serial_writer: std.io.AnyWriter,
     gdb_socket_path: ?[]const u8,
@@ -313,67 +335,48 @@ pub fn runRemuBinary(
         boot_hart: Tword,
     };
 
-    const memory_start: cpu_type.Tword = 0x8000_0000;
-    const memory_size: cpu_type.Tword = 1024*1024*512;
-    var current_location = memory_start;
-    var rvcpu = try cpu_type.init(
+    const opensbi_start     = 0x8000_0000;
+    const kernel_start      = 0x9000_0000;
+    const initrd_start      = 0xa000_0000;
+    const dtb_start         = 0xb000_0000;
+    const BusCfg = bus.BusDeviceConfig(Tword);
+    const cpu_bus = try bus.Bus(Tword).init(
         allocator,
-        memory_start,
-        memory_start,
-        memory_size,
+        &[_]BusCfg {
+            BusCfg.makeMemory(opensbi_start,    64*1024*1024),  // 64M  for OpenSBI
+            BusCfg.makeMemory(kernel_start,     512*1024*1024), // 512M for Linux
+            BusCfg.makeMemory(initrd_start,     64*1024*1024),  // 64M  for initrd
+            BusCfg.makeMemory(dtb_start,        8*1024*1024),   // 8M   for DTB, FwDynamicInfo
+            BusCfg.makeSerial(0x1000_0000, serial_writer),
+            BusCfg.makePlic(0xc00_0000),
+        },
+    );
+
+    var rvcpu = try cpu_type.initWithBus(
+        allocator,
+        opensbi_start,
+        cpu_bus,
         debug_writer,
         null,
-        serial_writer,
         gdb_socket_path,
     );
     defer rvcpu.deinit();
-    // load opensbi
-    {
-        const image_data = try std.fs.cwd().readFileAlloc(
-            allocator,
-            image_path, memory_size
-        );
-        defer allocator.free(image_data);
-        try rvcpu.loadData(current_location, image_data);
-        current_location += image_data.len;
-    }
-    const dtb_location: cpu_type.Tword     = 0x8800_0000;
-    const kernel_location: cpu_type.Tword  = 0x9000_0000;
-    std.debug.assert(current_location < dtb_location);
-    current_location = dtb_location;
-    {
-        const dtb_data = try std.fs.cwd().readFileAlloc(
-            allocator,
-            dtb_path, memory_size
-        );
-        defer allocator.free(dtb_data);
-        try rvcpu.loadData(current_location, dtb_data);
-        current_location += dtb_data.len;
-    }
-    alignOnPage(cpu_type.Tword, &current_location);
-    const boot_info_location = current_location;
-    current_location += @sizeOf(FwDynamicInfo);
-    alignOnPage(cpu_type.Tword, &current_location);
-    std.debug.assert(current_location < kernel_location);
-    current_location = kernel_location;
-    {
-        const kernel_data = try std.fs.cwd().readFileAlloc(
-            allocator,
-            kernel_path, memory_size
-        );
-        defer allocator.free(kernel_data);
-        try rvcpu.loadData(current_location, kernel_data);
-        current_location += kernel_data.len;
-    }
+
+    _ = try loadImage(opt, allocator, &rvcpu, opensbi_path, opensbi_start);
+    _ = try loadImage(opt, allocator, &rvcpu, initrd_path, initrd_start);
+    const dtb_end = try loadImage(opt, allocator, &rvcpu, dtb_path, dtb_start);
+    const fwinfo_start = dtb_end + 4096;
+    _ = try loadImage(opt, allocator, &rvcpu, kernel_path, kernel_start);
     const next_boot_info = FwDynamicInfo {
         .next_mode = @intCast(cpu.privilege.PrivilegeLevel.Supervisor.getEncoding()),
         .options = 0,
-        .next_addr = kernel_location,
+        .next_addr = kernel_start,
         .boot_hart = 0,
     };
-    try rvcpu.loadData(boot_info_location, std.mem.asBytes(&next_boot_info));
-    rvcpu.setRegister(11, dtb_location);
-    rvcpu.setRegister(12, boot_info_location);
+    try rvcpu.loadData(fwinfo_start, std.mem.asBytes(&next_boot_info));
+    rvcpu.setRegister(11, dtb_start);
+    rvcpu.setRegister(12, fwinfo_start);
+
     while (!rvcpu.isHalted()) {
         try rvcpu.tick();
     }

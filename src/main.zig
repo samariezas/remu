@@ -42,13 +42,14 @@ pub fn main() !u8 {
             return 1;
         }
     } else if (std.mem.eql(u8, run_type, "binary")) {
-        const image_path = args.next() orelse @panic("Missing image argument");
+        const opensbi_path = args.next() orelse @panic("Missing opensbi argument");
         const dtb_path = args.next() orelse @panic("Missing dtb argument");
         const kernel_path = args.next() orelse @panic("Missing kernel argument");
+        const initrd_path = args.next() orelse @panic("Missing initrd argument");
         const gdb_socket = args.next();
         std.debug.assert(!args.skip());
         const result = try tests.runRemuBinary(
-            tests.full64, allocator, image_path, dtb_path, kernel_path, null, raw_stdout_writer, gdb_socket
+            tests.full64, allocator, opensbi_path, dtb_path, kernel_path, initrd_path, null, raw_stdout_writer, gdb_socket
         );
         defer result.deinit(allocator);
     } else if (std.mem.eql(u8, run_type, "single")) {

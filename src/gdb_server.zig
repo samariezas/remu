@@ -348,7 +348,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                             defer self.allocator.free(mmap);
                             for (mmap) |mm| {
                                 const index, const pte = mm;
-                                printHex(&write_buffer, "{x:0<3}: {x} r{s}w{s}x{s}", .{
+                                printHex(&write_buffer, "{x:0>3}: {x} r{s}w{s}x{s}", .{
                                     index,
                                     @as(u44, @bitCast(pte.ppn)),
                                     if (pte.r != 0) "+" else "-",

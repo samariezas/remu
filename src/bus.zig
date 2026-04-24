@@ -207,7 +207,6 @@ const PlicState = struct {
                 if (ctx.interrupts_enabled[i] and
                     interrupt.pending and
                     interrupt.priority > ctx.priority_threshold) {
-                    std.debug.print("RETURNING SHOULD TRAP\n", .{});
                     return true;
                 }
             }
@@ -729,6 +728,7 @@ pub fn Bus(Tword: type) type {
 
         const Self = @This();
 
+        // TODO: assert there is no overlap
         pub fn init(allocator: Allocator, device_configs: []const BusDeviceConfig(Tword)) !Self {
             var devices = try std.ArrayList(BusDevice(Tword)).initCapacity(allocator, device_configs.len);
             errdefer {

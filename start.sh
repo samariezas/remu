@@ -44,6 +44,7 @@ GDB_SOCKET_FILE="${IMAGE_BUILD_DIR}/gdb.sock"
 OPENSBI_LOCATION="${IMAGE_BUILD_DIR}/opensbi"
 DTB_FILE="${IMAGE_BUILD_DIR}/simple.dtb"
 LINUX_LOCATION="${IMAGE_BUILD_DIR}/linux"
+INITRD_LOCATION="${IMAGE_BUILD_DIR}/initrd"
 
 mkdir -p "${IMAGE_BUILD_DIR}"
 
@@ -67,6 +68,11 @@ if [[ ! -d "${LINUX_LOCATION}" ]]; then
     nix build ".#image-linux" -o "${LINUX_LOCATION}"
 fi
 
+if [[ ! -f "${INITRD_LOCATION}" ]]; then
+    echo "Building initrd"
+    nix build ".#image-initramfs" -o "${INITRD_LOCATION}"
+fi
+
 set -x
 zig build "-Doptimize=${ZIG_OPTIMIZATION_LEVEL}"
 
@@ -85,6 +91,7 @@ COMMAND+=(
     "${OPENSBI_LOCATION}/fw_dynamic.bin"
     "${DTB_FILE}"
     "${LINUX_LOCATION}/Image"
+    "${INITRD_LOCATION}"
 )
 
 if $USE_REMOTE_GDB; then
