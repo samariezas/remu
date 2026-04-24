@@ -274,7 +274,7 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
             // defer arena.deinit();
             // const allocator = arena.allocator();
 
-            // std.debug.print("Packet: {s}\n", .{packet.payload});
+            // std.debug.print("GDB packet: {s}\n", .{packet.payload});
             if (std.mem.startsWith(u8, packet.payload, "qSupported")) {
                 try self.sendResponse("PacketSize=4000;swbreak-;hwbreak+;vContSupported");
             } else if (std.mem.startsWith(u8, packet.payload, "vCont?")) {

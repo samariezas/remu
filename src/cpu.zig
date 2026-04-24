@@ -499,6 +499,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         mideleg: Tword,
         mie_bits: Tword,
         mip_bits: Tword,
+        mcounteren: Tword,
+        scounteren: Tword,
         mscratch: Tword,
         sscratch: Tword,
 
@@ -510,6 +512,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         ppn: u44,
 
         timer: std.time.Timer,
+
+        // emulating SBI
+        sbi_timer_compare: Tword,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -994,6 +999,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteMie(cpu: *Self, value: Tword) void { cpu.mie_bits = value; }
         fn handleReadMie(cpu: *const Self) Tword { return cpu.mie_bits; }
 
+        fn handleWriteMcounteren(cpu: *Self, value: Tword) void { cpu.mcounteren = value; }
+        fn handleReadMcounteren(cpu: *Self) Tword { return cpu.mcounteren; }
+
+        fn handleWriteScounteren(cpu: *Self, value: Tword) void { cpu.scounteren = value; }
+        fn handleReadScounteren(cpu: *Self) Tword { return cpu.scounteren; }
+
         fn handleWriteMip(cpu: *Self, value: Tword) void {
             // Keep this conservative for now: software can inject SSIP/MSIP and
             // clear software-controlled pending bits. External/timer sources can
@@ -1035,12 +1046,16 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return 0;
         }
 
-        fn handleReadTime(cpu: *Self) Tword {
+        fn currentTime(cpu: *Self) Tword {
             // TODO: un-hardcode
             const freq_hz: comptime_int = 10_000_000;
             const elapsed_ns = @as(u128, cpu.timer.read());
             const ticks_elapsed: Tword = @truncate((elapsed_ns * freq_hz) / std.time.ns_per_s);
             return ticks_elapsed;
+        }
+
+        fn handleReadTime(cpu: *Self) Tword {
+            return cpu.currentTime();
         }
 
         fn handleReadMisa(_: *const Self) Tword {
@@ -1112,6 +1127,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             CsrMapEntry.new("sscratch",0x140, handleWriteSscratch,          handleReadSscratch),
 
             CsrMapEntry.new("misa",    0x301, handleWriteStub,              handleReadMisa),
+            CsrMapEntry.new("mcounteren",0x306,handleWriteMcounteren,        handleReadMcounteren),
             CsrMapEntry.new("mvendorid",0xf11,null,                         handleReadZero),
 
             // TODO: replace with non-stubs
@@ -1130,7 +1146,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             // LINUX stubs
             // TODO: replace with non-stubs
-            CsrMapEntry.new("scounteren",0x106, handleWriteStub,           handleReadStub),
+            CsrMapEntry.new("scounteren",0x106, handleWriteScounteren,     handleReadScounteren),
             CsrMapEntry.new("time",      0xc01, null,                      handleReadTime),
         };
 
@@ -1309,6 +1325,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 self.setInterruptPending(.machine_external, false);
                 self.setInterruptPending(.supervisor_external, false);
             }
+
+            self.setInterruptPending(
+                .supervisor_timer,
+                self.sbi_timer_compare != std.math.maxInt(Tword) and
+                    self.currentTime() >= self.sbi_timer_compare,
+            );
         }
 
         fn interruptCanTrapToM(self: *const Self, cause: InterruptCause) bool {
@@ -1688,6 +1710,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .mideleg = 0,
                 .mie_bits = 0,
                 .mip_bits = 0,
+                .mcounteren = 0b111,
+                .scounteren = 0,
                 .mscratch = 0,
                 .sscratch = 0,
                 .memory_reservation = null,
@@ -1696,6 +1720,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .asid = 0,
                 .ppn = 0,
                 .timer = try std.time.Timer.start(),
+                .sbi_timer_compare = std.math.maxInt(Tword),
             };
         }
 
@@ -2236,7 +2261,57 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
+        fn sbiReturn(self: *Self, err: Tword, value: Tword) void {
+            self.setRegister(10, err);
+            self.setRegister(11, value);
+            self.pc += 4;
+        }
+
+        fn handleSbiEcall(self: *Self) bool {
+            const SBI_SUCCESS: Tword = 0;
+            const SBI_ERR_NOT_SUPPORTED: Tword = @bitCast(@as(toSigned(Tword), -2));
+            const SBI_EXT_BASE: Tword = 0x10;
+            const SBI_EXT_TIME: Tword = 0x54494D45;
+
+            const extension = self.getRegister(17);
+            const function = self.getRegister(16);
+
+            if (extension == 0) {
+                self.sbi_timer_compare = self.getRegister(10);
+                self.setInterruptPending(.supervisor_timer, false);
+                self.pc += 4;
+                return true;
+            }
+
+            if (extension == SBI_EXT_TIME and function == 0) {
+                self.sbi_timer_compare = self.getRegister(10);
+                self.setInterruptPending(.supervisor_timer, false);
+                self.sbiReturn(SBI_SUCCESS, 0);
+                return true;
+            }
+
+            if (extension == SBI_EXT_BASE) {
+                switch (function) {
+                    0 => self.sbiReturn(SBI_SUCCESS, 2),       // SBI spec v0.2
+                    1 => self.sbiReturn(SBI_SUCCESS, 0),       // implementation id
+                    2 => self.sbiReturn(SBI_SUCCESS, 0),       // implementation version
+                    3 => { // probe_extension(extid in a0)
+                        const extid = self.getRegister(10);
+                        self.sbiReturn(SBI_SUCCESS, if (extid == SBI_EXT_TIME) 1 else 0);
+                    },
+                    4, 5, 6 => self.sbiReturn(SBI_SUCCESS, 0), // mvendorid/marchid/mimpid
+                    else => self.sbiReturn(SBI_ERR_NOT_SUPPORTED, 0),
+                }
+                return true;
+            }
+
+            return false;
+        }
+
         fn handleEcall(self: *Self, _: u32) ?TError {
+            if (self.current_privilege_level == .Supervisor and self.handleSbiEcall()) {
+                return null;
+            }
             return switch (self.current_privilege_level) {
                 .User => TError.EcallFromU,
                 .Supervisor => TError.EcallFromS,
