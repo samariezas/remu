@@ -449,6 +449,9 @@ test "PLIC address classification" {
 
 const SerialDevice = struct {
     writer: AnyWriter,
+    rx_fifo: [16]u8,
+    rx_head: u8,
+    rx_len: u8,
 
     ier: u8, // Interrupt Enable Register
     iir: u8, // Interrupt Identification Register (read-only view)
@@ -464,6 +467,7 @@ const SerialDevice = struct {
     const IER_ETBEI: u8 = 0x02;
     const IIR_NO_INTERRUPT_PENDING: u8 = 0x01;
     const IIR_THRE: u8 = 0x02;
+    const IIR_RDA: u8 = 0x04;
     const IIR_CTYPE_16550A: u8 = 0xC0;
     const LSR_DR: u8 = 0x01;
     const LSR_THRE: u8 = 0x20;
@@ -472,6 +476,9 @@ const SerialDevice = struct {
     fn init(writer: AnyWriter) SerialDevice {
         return .{
             .writer = writer,
+            .rx_fifo = undefined,
+            .rx_head = 0,
+            .rx_len = 0,
             .ier = 0,
             .iir = IIR_NO_INTERRUPT_PENDING | IIR_CTYPE_16550A,
             .lcr = 0,
@@ -487,12 +494,42 @@ const SerialDevice = struct {
         return (self.lcr & LCR_DLAB) != 0;
     }
 
+    pub fn hasRx(self: *const SerialDevice) bool {
+        return self.rx_len != 0;
+    }
+
+    fn pushRxByte(self: *SerialDevice, byte: u8) void {
+        if (self.rx_len == self.rx_fifo.len) {
+            // Drop the oldest byte when the tiny FIFO overflows.
+            // TODO: this needs to be done way better though
+            self.rx_head = @intCast((@as(usize, self.rx_head) + 1) % self.rx_fifo.len);
+            self.rx_len -= 1;
+            std.debug.print("W: dropped a RX byte!\n", .{});
+        }
+
+        self.rx_fifo[(@as(usize, self.rx_head) + @as(usize, self.rx_len)) % self.rx_fifo.len] = byte;
+        self.rx_len += 1;
+        self.lsr |= LSR_DR;
+    }
+
+    fn popRxByte(self: *SerialDevice) u8 {
+        if (self.rx_len == 0) return 0;
+
+        const byte = self.rx_fifo[self.rx_head];
+        self.rx_head = @intCast((@as(usize, self.rx_head) + 1) % self.rx_fifo.len);
+        self.rx_len -= 1;
+
+        if (self.rx_len == 0) self.lsr &= ~LSR_DR;
+        return byte;
+    }
+
     fn updateInterrupts(self: *SerialDevice, plic: ?*PlicState) void {
         var pending = false;
 
-        // Write-only minimal ns16550 model:
-        // Generate THRE interrupt whenever THR is empty and ETBEI is enabled.
-        if ((self.ier & IER_ETBEI) != 0 and
+        if ((self.ier & IER_ERBFI) != 0 and self.hasRx()) {
+            self.iir = IIR_RDA | IIR_CTYPE_16550A;
+            pending = true;
+        } else if ((self.ier & IER_ETBEI) != 0 and
             (self.lsr & LSR_THRE) != 0)
         {
             self.iir = IIR_THRE | IIR_CTYPE_16550A;
@@ -503,7 +540,6 @@ const SerialDevice = struct {
 
         if (plic) |p| {
             if (pending) {
-                std.debug.print("Writing SERIAL pending\n", .{});
                 p.setInterruptPending(SERIAL_INTERRUPT_ID);
             } else {
                 p.clearInterruptPending(SERIAL_INTERRUPT_ID);
@@ -516,30 +552,24 @@ const ClintState = struct {
     const Self = @This();
 
     timer: std.time.Timer,
-    interrupts_enabled: bool,
     mtimecmp: u64,
 
     fn init() !Self {
         return .{
             .timer = try std.time.Timer.start(),
-            .interrupts_enabled = false,
             .mtimecmp = 0,
         };
     }
 
-    fn getMsip(self: *const Self) u32 {
-        return @intFromBool(self.interrupts_enabled);
-    }
-
-    fn writeMsip(self: *Self, value: u32) void {
-        self.interrupts_enabled = (value & 1) != 0;
-    }
-
     pub fn getMtime(self: *Self) u64 {
-        // TODO: un-hardcode
+        // TODO: un-hardcode frequency
         const freq_hz: comptime_int = 10_000_000;
         const elapsed_ns = @as(u128, self.timer.read());
         return @truncate((elapsed_ns * freq_hz) / std.time.ns_per_s);
+    }
+
+    pub fn getMtimecmp(self: *Self) u64 {
+        return self.mtimecmp;
     }
 
     pub fn shouldInterrupt(self: *Self) bool {
@@ -641,17 +671,17 @@ fn BusDevice(comptime Tword: type) type {
                     const s_offset: usize = @intCast(offset);
                     @memcpy(dest, m.data[s_offset..(s_offset+dest.len)]);
                 },
-                .serial => {
+                .serial => |*s| {
                     for (0..dest.len) |i| {
                         const byte_offset = offset + i;
                         switch (byte_offset) {
-                            0 => dest[i] = if (self.vtag.serial.dlab()) self.vtag.serial.dll else 0, // DLL or RBR
-                            1 => dest[i] = if (self.vtag.serial.dlab()) self.vtag.serial.dlm else self.vtag.serial.ier, // DLM or IER
-                            2 => dest[i] = self.vtag.serial.iir, // IIR
-                            3 => dest[i] = self.vtag.serial.lcr, // LCR
-                            4 => dest[i] = self.vtag.serial.mcr, // MCR
-                            5 => dest[i] = self.vtag.serial.lsr, // LSR
-                            7 => dest[i] = self.vtag.serial.scr, // SCR
+                            0 => dest[i] = if (s.dlab()) s.dll else s.popRxByte(), // DLL or RBR
+                            1 => dest[i] = if (s.dlab()) s.dlm else s.ier, // DLM or IER
+                            2 => dest[i] = s.iir, // IIR
+                            3 => dest[i] = s.lcr, // LCR
+                            4 => dest[i] = s.mcr, // MCR
+                            5 => dest[i] = s.lsr, // LSR
+                            7 => dest[i] = s.scr, // SCR
                             else => dest[i] = 0,
                         }
                     }
@@ -665,7 +695,7 @@ fn BusDevice(comptime Tword: type) type {
                 },
                 .clint => |*clint| {
                     if (offset == 0x0 and dest.len == 4) {
-                        const retval: u32 = clint.getMsip();
+                        const retval: u32 = 0;
                         @memcpy(dest, std.mem.asBytes(&retval));
                     } else if (offset == 0x4000 and dest.len == 8) {
                         const retval: u64 = clint.mtimecmp;
@@ -735,7 +765,7 @@ fn BusDevice(comptime Tword: type) type {
                 },
                 .clint => |*clint| {
                     if (offset == 0x0 and src.len == 4) {
-                        clint.writeMsip(std.mem.readInt(u32, @ptrCast(src), .little));
+                        std.debug.print("W: writing CLINT offset 0\n", .{});
                     } else if (offset == 0x4000 and src.len == 8) {
                         clint.mtimecmp = std.mem.readInt(u64, @ptrCast(src), .little);
                     } else if (offset == 0xbff8 and src.len == 8) {
@@ -898,6 +928,20 @@ pub fn Bus(Tword: type) type {
                 }
             }
             return null;
+        }
+
+        pub fn serialInputEmpty(self: *Self) bool {
+            if (self.findSerialDevice()) |serial| {
+                return serial.hasRx();
+            }
+            return false;
+        }
+
+        pub fn pushSerialInput(self: *Self, bytes: []const u8) void {
+            if (self.findSerialDevice()) |serial| {
+                for (bytes) |byte| serial.pushRxByte(byte);
+                serial.updateInterrupts(self.findPlic());
+            }
         }
 
         pub fn findClint(self: *Self) ?*ClintState {

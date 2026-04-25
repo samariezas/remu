@@ -434,6 +434,59 @@ fn ExecutionError(Tword: type) type {
 
 const DebugPrintError = error { WriteFailed };
 
+const SerialReader = struct {
+    const Self = @This();
+
+    reader: std.io.AnyReader,
+    buffer: std.ArrayList(u8),
+    tick_counter: usize,
+
+    fn init(allocator: Allocator, reader: std.io.AnyReader) Self {
+        return .{
+            .reader = reader,
+            .buffer = std.ArrayList(u8).init(allocator),
+            .tick_counter = 0,
+        };
+    }
+
+    fn popFromBuffer(self: *Self, dest: []u8) ![]u8 {
+        std.debug.assert(self.buffer.items.len > 0);
+        const len_to_copy = @min(self.buffer.items.len, dest.len);
+        @memcpy(dest[0..len_to_copy], self.buffer.items[0..len_to_copy]);
+        const retval = dest[0..len_to_copy];
+        const items_remaining = self.buffer.items.len - len_to_copy;
+        const update_dest = self.buffer.items[0..items_remaining];
+        const update_src  = self.buffer.items[len_to_copy..];
+        std.debug.assert(update_dest.len == update_src.len);
+        std.mem.copyForwards(
+            u8,
+            update_dest,
+            update_src
+        );
+        self.buffer.shrinkRetainingCapacity(items_remaining);
+        return retval;
+    }
+
+    fn tryReading(self: *Self, dest: []u8) ![]u8 {
+        if (self.buffer.items.len > 0) {
+            return self.popFromBuffer(dest);
+        } else if (self.tick_counter < 1000) {
+            self.tick_counter += 1;
+            return &.{};
+        } else {
+            self.tick_counter = 0;
+            var buffer: [4096]u8 = undefined;
+            const read_cnt: usize = self.reader.read(&buffer) catch |err| switch(err) {
+                error.WouldBlock => 0,
+                else => return err,
+            };
+            if (read_cnt == 0) return &.{};
+            try self.buffer.appendSlice(buffer[0..read_cnt]);
+            return self.popFromBuffer(dest);
+        }
+    }
+};
+
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
     const SignatureInfo = struct {
         signature_start: opt.getTword(),
@@ -510,6 +563,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         paging_enabled: bool,
         asid: u16,
         ppn: u44,
+
+        serial_reader: ?SerialReader,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -1001,11 +1056,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleReadScounteren(cpu: *Self) Tword { return cpu.scounteren; }
 
         fn handleWriteMip(cpu: *Self, value: Tword) void {
-            // Keep this conservative for now: software can inject SSIP/MSIP and
-            // clear software-controlled pending bits. External/timer sources can
-            // overwrite these later via refreshPendingInterrupts().
             const writable_mask =
                 (@as(Tword, 1) << @intFromEnum(InterruptCause.supervisor_software)) |
+                (@as(Tword, 1) << @intFromEnum(InterruptCause.supervisor_timer)) |
+                (@as(Tword, 1) << @intFromEnum(InterruptCause.machine_timer)) |
                 (@as(Tword, 1) << @intFromEnum(InterruptCause.machine_software));
             cpu.mip_bits = (cpu.mip_bits & ~writable_mask) | (value & writable_mask);
         }
@@ -1307,6 +1361,18 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     .machine_timer,
                     clint.shouldInterrupt()
                 );
+            }
+
+            if (self.serial_reader) |*reader| {
+                if (self._bus.findSerialDevice()) |serial| {
+                    if (!serial.hasRx()) {
+                        var buffer: [16]u8 = undefined;
+                        const read_from_stdin = reader.tryReading(&buffer) catch @panic("Failed reading serial input");
+                        if (read_from_stdin.len > 0) {
+                            self._bus.pushSerialInput(read_from_stdin);
+                        }
+                    }
+                }
             }
 
             // Standard, controller-agnostic CPU view:
@@ -1633,6 +1699,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             writer: ?std.io.AnyWriter,
             signature_info: ?SignatureInfo,
             serial_writer: std.io.AnyWriter,
+            serial_reader: ?std.io.AnyReader,
             debugger_filepath: ?[]const u8,
         ) !RVCPU(opt) {
             const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
@@ -1648,6 +1715,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 entrypoint,
                 cpu_bus,
                 writer,
+                serial_reader,
                 signature_info,
                 debugger_filepath
             );
@@ -1658,6 +1726,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             entrypoint: Tword,
             cpu_bus: Bus(Tword),
             writer: ?std.io.AnyWriter,
+            serial_reader: ?std.io.AnyReader,
             signature_info: ?SignatureInfo,
             debugger_filepath: ?[]const u8,
         ) !RVCPU(opt) {
@@ -1707,6 +1776,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
+                .serial_reader = if (serial_reader) |rd| SerialReader.init(allocator, rd) else null,
             };
         }
 

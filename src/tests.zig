@@ -263,6 +263,7 @@ pub fn runRemu(
             .tohost_address = signature_info.tohost.address,
         },
         serial_writer,
+        null,
         debugger_filepath,
     );
     defer rvcpu.deinit();
@@ -353,11 +354,18 @@ pub fn runRemuBinary(
         },
     );
 
+    const stdin = std.io.getStdIn();
+    const stdin_reader = stdin.reader();
+    const any_stdin_reader = stdin_reader.any();
+    const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
+    _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | linux.IN.NONBLOCK);
+
     var rvcpu = try cpu_type.initWithBus(
         allocator,
         opensbi_start,
         cpu_bus,
         debug_writer,
+        any_stdin_reader,
         null,
         gdb_socket_path,
     );

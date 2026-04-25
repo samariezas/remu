@@ -86,6 +86,10 @@ if $USE_PERF; then
     )
 fi
 
+if ! $USE_HOST_GDB; then
+    COMMAND+=(rlwrap)
+fi
+
 COMMAND+=(
     zig-out/bin/bemu binary
     "${OPENSBI_LOCATION}/fw_dynamic.bin"

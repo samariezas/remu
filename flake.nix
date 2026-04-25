@@ -40,6 +40,7 @@
 
             tests.spike-mod
             dtc
+            rlwrap
           ];
         };
         riscv = tests.riscv-devshell;
