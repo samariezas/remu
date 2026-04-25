@@ -1006,7 +1006,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             fn handleWrite(cpu: *Self, value: Tword) void {
                 const parsed: SatpCSR = @bitCast(value);
-                std.debug.print("Writing satp={any} @{x}\n", .{parsed, cpu.pc});
                 cpu.ppn = parsed.ppn;
                 cpu.asid = parsed.asid;
                 switch (parsed.mode) {
@@ -1486,6 +1485,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
+            if (self.pc == 0xffffffff804889bc) {
+                @breakpoint();
+            }
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
             self.refreshPendingInterrupts();
@@ -1532,16 +1534,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             }
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
-                std.debug.print("Execution error @0x{x}: {any}\n", .{self.pc, err});
-                switch (err) {
-                    .EcallFromU => {
-                        std.debug.print("Syscall = {} (0x{x})\n", .{
-                            self.getRegister(17),
-                            self.getRegister(17)
-                        });
-                    },
-                    else => {},
-                }
                 self.trap(err);
             }
         }
@@ -1793,6 +1785,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                     };
                 }
             }
+            if (self._bus.shouldPoweroff()) return true;
             return self.test_result != null;
         }
 
@@ -1834,7 +1827,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
             if (findCsr(id)) |csr| {
                 const csr_read = csr.read_handler(self);
-                // std.debug.print("Read CSR {s} = 0x{x}\n", .{csr.name, csr_read});
                 return csr_read;
             }
             return null;
@@ -1843,7 +1835,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn writeCsr(self: *Self, id: Tcsrid, value: Tword) ?TError {
             if (findCsr(id)) |csr| {
                 if (csr.write_handler) |handler| {
-                    // std.debug.print("Writing CSR {s} = 0x{x}\n", .{csr.name, value});
                     handler(self, value);
                     return null;
                 }

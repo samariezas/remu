@@ -64,5 +64,15 @@
       interrupts-extended = <&CPU0_intc 3 &CPU0_intc 7>;
       reg = <0x0 0x02000000 0x0 0x00010000>;
     };
+    poweroff_syscon: poweroff-syscon@100000 {
+      compatible = "syscon", "simple-mfd";
+      reg = <0x0 0x00100000 0x0 0x1000>;
+
+      poweroff {
+        compatible = "syscon-poweroff";
+        offset = <0x0>;
+        value = <0x5555>;
+      };
+    };
   };
 };

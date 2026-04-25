@@ -218,7 +218,6 @@ const PlicState = struct {
 
     fn getWord(self: *PlicState, offset: u32) BusError!u32 {
         const address_class = PlicAddressClass.classifyAddress(offset);
-        std.debug.print("Reading PLIC address with offset: {x}\n", .{offset});
         switch (address_class) {
             .Misaligned => return BusError.AlignmentFault,
             .Reserved => return BusError.AccessFault,
@@ -242,7 +241,6 @@ const PlicState = struct {
 
     fn writeWord(self: *PlicState, offset: u32, word: u32) BusError!void {
         const address_class = PlicAddressClass.classifyAddress(offset);
-        std.debug.print("Writing PLIC address with offset: {x}\n", .{offset});
         switch (address_class) {
             .Misaligned => return BusError.AlignmentFault,
             .Reserved => return BusError.AccessFault,
@@ -589,6 +587,7 @@ fn BusDevice(comptime Tword: type) type {
             serial: SerialDevice,
             plic: PlicState,
             clint: ClintState,
+            poweroff: struct { requested: bool },
         },
 
         const Self = @This();
@@ -620,6 +619,15 @@ fn BusDevice(comptime Tword: type) type {
                 .start_address = start_address,
                 .length = 0x1_0000,
                 .vtag = .{ .clint = ClintState.init() catch @panic("Cannot init CLINT"), },
+            };
+            return retval;
+        }
+
+        fn initPoweroff(start_address: Tword) Self {
+            const retval = Self {
+                .start_address = start_address,
+                .length = 0x1000,
+                .vtag = .{ .poweroff = .{ .requested = false, }, },
             };
             return retval;
         }
@@ -658,6 +666,7 @@ fn BusDevice(comptime Tword: type) type {
                 .serial => { },
                 .plic => { },
                 .clint => { },
+                .poweroff => { },
             }
         }
 
@@ -707,6 +716,9 @@ fn BusDevice(comptime Tword: type) type {
                         std.debug.print("W: access fault on CLINT\n", .{});
                         return error.AccessFault;
                     }
+                },
+                .poweroff => {
+                    return error.AccessFault;
                 },
             }
         }
@@ -776,6 +788,10 @@ fn BusDevice(comptime Tword: type) type {
                         return error.AccessFault;
                     }
                 },
+                .poweroff => |*p| {
+                    std.debug.print("Writing to poweroff{x}\n", .{src});
+                    p.requested = true;
+                },
             }
         }
     };
@@ -796,6 +812,9 @@ pub fn BusDeviceConfig(Tword: type) type {
             start: Tword
         },
         clint: struct {
+            start: Tword
+        },
+        poweroff: struct {
             start: Tword
         },
 
@@ -824,6 +843,12 @@ pub fn BusDeviceConfig(Tword: type) type {
                 .start = address_start,
             }};
         }
+
+        pub fn makePoweroff(address_start: Tword) Self {
+            return .{ .poweroff = .{
+                .start = address_start,
+            }};
+        }
         
         fn buildDevice(self: *const Self, allocator: Allocator) !BusDevice(Tword) {
             return switch (self.*) {
@@ -831,6 +856,7 @@ pub fn BusDeviceConfig(Tword: type) type {
                 .serial => |*s| BusDevice(Tword).initSerial(s.start, s.output_device),
                 .plic => |*p| BusDevice(Tword).initPlic(p.start),
                 .clint => |*p| BusDevice(Tword).initClint(p.start),
+                .poweroff => |*p| BusDevice(Tword).initPoweroff(p.start),
             };
         }
     };
@@ -928,6 +954,16 @@ pub fn Bus(Tword: type) type {
                 }
             }
             return null;
+        }
+
+        pub fn shouldPoweroff(self: *Self) bool {
+            for (self.devices) |*dev| {
+                switch (dev.*.vtag) {
+                    .poweroff => |*p| return p.*.requested,
+                    else => { },
+                }
+            }
+            return false;
         }
 
         pub fn serialInputEmpty(self: *Self) bool {
