@@ -2,12 +2,37 @@ const std = @import("std");
 const cpu = @import("cpu.zig");
 const cpu_config = cpu.cpu_config;
 const tests = @import("tests.zig");
+const File = std.fs.File;
 const CpuOptions = cpu_config.CpuOptions;
 const WordSize = cpu_config.WordSize;
 const linux = std.os.linux;
 const posix = std.posix;
 const process = std.process;
 const Allocator = std.mem.Allocator;
+
+pub fn enableRawMode(file: File) !std.posix.termios {
+    const orig = try std.posix.tcgetattr(file.handle);
+    var raw = orig;
+
+    raw.iflag.IXON = false;
+    raw.iflag.ICRNL = false;
+
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    raw.lflag.ISIG = false;
+
+    raw.cflag.CSIZE = .CS8;
+
+    raw.cc[@intFromEnum(posix.V.MIN)] = 0;
+    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+
+    try std.posix.tcsetattr(file.handle, .NOW, raw);
+    return orig;
+}
+
+pub fn restore(file: File, orig: std.posix.termios) void {
+    std.posix.tcsetattr(file.handle, .NOW, orig) catch @panic("Failed resetting terminal");
+}
 
 pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -49,6 +74,9 @@ pub fn main() !u8 {
         const initrd_path = args.next() orelse @panic("Missing initrd argument");
         const gdb_socket = args.next();
         std.debug.assert(!args.skip());
+        const stdin = std.io.getStdIn();
+        const old_terminal_settings = try enableRawMode(stdin);
+        defer restore(stdin, old_terminal_settings);
         try tests.runRemuBinary(
             tests.full64,
             allocator,
@@ -57,7 +85,7 @@ pub fn main() !u8 {
             kernel_path,
             initrd_path,
             null,
-            std.io.getStdIn(),
+            stdin,
             std.io.getStdOut(),
             gdb_socket
         );
