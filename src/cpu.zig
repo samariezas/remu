@@ -1,6 +1,7 @@
 const std = @import("std");
 const bus = @import("bus.zig");
 const io = @import("io.zig");
+const instruction_cache = @import("instruction_cache.zig");
 const IoHandler = io.IoHandler;
 pub const privilege = @import("privilege.zig");
 pub const cpu_config = @import("cpu_config.zig");
@@ -452,6 +453,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         const Self = @This();
         pub const Tword = opt.getTword();
         const TError = ExecutionError(Tword);
+        const Instr = InstructionDescriptor(opt);
+
+        // const TICache = instruction_cache.ICache(Tword, Instr);
+        const TICache = instruction_cache.ArrICache(Tword, Instr);
 
         const InterruptCause = enum(u5) {
             supervisor_software = 1,
@@ -512,8 +517,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         paging_enabled: bool,
         asid: u16,
         ppn: u44,
-
-        const Instr = InstructionDescriptor(opt);
+        instruction_cache: TICache,
 
         fn shiftLen() type {
             switch (opt.word_size) {
@@ -601,7 +605,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             Instr.makeDirect("ECALL", 0x73,         handleEcall, null).noJump(),
             Instr.makeDirect("EBREAK",0x100073,     handleEbreak, null).noJump(),
             Instr.makeF3("FENCE",   0b0001111, 0,   handleNop,   null),
-            Instr.makeF3("FENCE.I", 0b0001111, 1,   handleNop,   null),
+            Instr.makeF3("FENCE.I", 0b0001111, 1,   handleFenceI,   null),
         } ++ 
             (if (opt.word_size == .w64) [_]Instr {
                 Instr.makeF3("LWU",  0b0000011, 6,    handleLwu,  null),
@@ -1416,10 +1420,55 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
-        fn executeInstruction(self: *Self) DebugPrintError!?TError {
-            if (self.pc == 0xffffffff804889bc) {
-                @breakpoint();
+        const InstructionHandlerFetchResult = union(enum) {
+            Success: TICache.CachedInstruction,
+            IllegalInstruction: u32,
+            Exception: TError,
+        };
+
+        fn getNextInstructionHandlerWithCache(self: *Self) InstructionHandlerFetchResult {
+            switch (self.instruction_cache.cacheLookup(self.pc) catch @panic("OOM")) {
+                .Hit => |hit| {
+                    return InstructionHandlerFetchResult { .Success = hit, };
+                },
+                .Miss => |miss| {
+                    var instruction: u32 = undefined;
+                    if (self.getNextInstruction(&instruction)) |err| {
+                        return InstructionHandlerFetchResult { .Exception = err, };
+                    }
+                    const instruction_id: InstructionIdentifiers = @bitCast(instruction);
+                    if (Self.findMatchingInstruction(instruction_id)) |matched| {
+                        return InstructionHandlerFetchResult {
+                            .Success = TICache.updateCache(miss, instruction, matched),
+                        };
+                    }
+                    return InstructionHandlerFetchResult { .IllegalInstruction = instruction };
+                },
             }
+        }
+
+        fn getNextInstructionHandlerNoCache(self: *Self) InstructionHandlerFetchResult {
+            var instruction: u32 = undefined;
+            if (self.getNextInstruction(&instruction)) |err| {
+                return InstructionHandlerFetchResult { .Exception = err, };
+            }
+            const instruction_id: InstructionIdentifiers = @bitCast(instruction);
+            if (Self.findMatchingInstruction(instruction_id)) |matched| {
+                return InstructionHandlerFetchResult {
+                    .Success = .{
+                        .instruction = instruction,
+                        .handler = matched,
+                    },
+                };
+            }
+            return InstructionHandlerFetchResult { .IllegalInstruction = instruction };
+        }
+
+        fn getNextInstructionHandler(self: *Self) InstructionHandlerFetchResult {
+            return self.getNextInstructionHandlerWithCache();
+        }
+
+        fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
             self.refreshPendingInterrupts();
@@ -1428,33 +1477,31 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 return null;
             }
 
-            try self.debugPrint("Instruction: PC=0x{x:0>8}", .{self.pc});
-            var instruction: u32 = undefined;
-            if (self.getNextInstruction(&instruction)) |err| {
-                return err;
-            }
-            const instruction_id: InstructionIdentifiers = @bitCast(instruction);
-            try self.debugPrint(" Instr=0x{x:0>8}\n", .{instruction});
-            try self.debugPrint("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
-            if (Self.findMatchingInstruction(instruction_id)) |i| {
-                if (self.debug_writer) |writer| {
-                    i.print(writer, instruction, self.pc) catch return error.WriteFailed;
-                }
-                const execution_error = i.handler(self, instruction);
-                if (execution_error) |err| {
+            // if (self.pc == 0xffffffff804889bc) {
+            //     @breakpoint();
+            // }
+            // if (self.pc == 0xffffffff804889d0) {
+            //     @breakpoint();
+            // }
+
+            switch (self.getNextInstructionHandler()) {
+                .Success => |*instruction| {
+                    const execution_error = instruction.handler.handler(self, instruction.instruction);
+                    if (execution_error) |err| {
+                        return err;
+                    }
+                    if (instruction.handler.advance_pc) {
+                        self.pc += 4;
+                    }
+                    return null;
+                },
+                .IllegalInstruction => |instruction| {
+                    return TError { .IllegalInstruction = @intCast(instruction) };
+                },
+                .Exception => |err| {
                     return err;
-                }
-                if (self.debug_writer) |writer| {
-                    self.writeRegisters(writer, 4) catch return error.WriteFailed;
-                }
-                if (i.advance_pc) {
-                    self.pc += 4;
-                }
-                try self.debugPrint("\n", .{});
-                return null;
+                },
             }
-            try self.debugPrint("Caught illegal instruction!\n", .{});
-            return TError { .IllegalInstruction = @intCast(instruction) };
         }
 
         pub fn tick(self: *Self) !void {
@@ -1670,6 +1717,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
+                .instruction_cache = try TICache.init(allocator, 1048573),
             };
         }
 
@@ -2754,6 +2802,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleScD(self: *Self, instruction: u32) ?TError {
             return Self.handleScGeneric(u64, self, instruction);
+        }
+
+        fn handleFenceI(self: *Self, _: u32) ?TError {
+            self.instruction_cache.updateGeneration();
+            return null;
         }
 
         fn handleNop(_: *Self, _: u32) ?TError {
