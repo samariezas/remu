@@ -327,9 +327,9 @@ pub fn runRemuBinary(
     serial_reader: File,
     serial_writer: File,
     gdb_socket_path: ?[]const u8,
-) !RemuRunResult {
-    _ = gdb_socket_path;
+) !void {
     var io_handler = try io.IoHandler.init(allocator, serial_reader, serial_writer, null);
+    defer io_handler.deinit();
     const cpu_type = cpu.RVCPU(opt);
     const Tword = cpu_type.Tword;
     const FwDynamicInfo = packed struct {
@@ -360,6 +360,7 @@ pub fn runRemuBinary(
                 io_handler.getSerialWriter()
             ),
             BusCfg.makeClint(0x200_0000),
+            BusCfg.makePoweroff(0x10_0000),
         },
         &io_handler
     );
@@ -376,7 +377,7 @@ pub fn runRemuBinary(
         cpu_bus,
         debug_writer,
         null,
-        // gdb_socket_path,
+        gdb_socket_path,
     );
     defer rvcpu.deinit();
 
@@ -398,13 +399,6 @@ pub fn runRemuBinary(
     while (!rvcpu.isHalted()) {
         try rvcpu.tick();
     }
-    const signature = try rvcpu.getSignature(allocator);
-    const failure_code = rvcpu.getTestFailureCode();
-    const failure_code_u64: ?u64 = if (failure_code) |code| @intCast(code) else null;
-    return .{
-        .failure_code = failure_code_u64,
-        .signature = signature,
-    };
 }
 
 const CollectedRemuRunResult = struct {

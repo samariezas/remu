@@ -742,7 +742,7 @@ fn BusDevice(comptime Tword: type) type {
                     }
                 },
                 .poweroff => {
-                    return error.AccessFault;
+                    @memset(dest, 0);
                 },
             }
         }
@@ -811,7 +811,6 @@ fn BusDevice(comptime Tword: type) type {
                     }
                 },
                 .poweroff => |*p| {
-                    std.debug.print("Writing to poweroff{x}\n", .{src});
                     p.requested = true;
                 },
             }

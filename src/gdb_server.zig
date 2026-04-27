@@ -146,9 +146,6 @@ pub fn DebugInterface(opt: CpuOptions) type {
 
 pub fn GdbDebugServer(opt: CpuOptions) type {
     const Tword = opt.getTword();
-    const PollStreams = enum {
-        GdbConnection,
-    };
 
     return struct {
         const Self = @This();
@@ -156,10 +153,8 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
         allocator: Allocator,
         rx_buffer: RxBuffer,
         breakpoints: std.ArrayList(Tword),
-        socket_path: []const u8,
         socket_fd: std.posix.socket_t,
         client: std.fs.File,
-        poller: std.io.Poller(PollStreams),
         cpu_state: CpuState,
         debug_interface: DebugInterface(opt),
         tick: usize,
@@ -182,14 +177,8 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
                 .allocator = allocator,
                 .rx_buffer = RxBuffer.init(allocator),
                 .breakpoints = std.ArrayList(Tword).init(allocator),
-                .socket_path = try allocator.dupe(u8, path),
                 .socket_fd = socket_fd,
                 .client = client,
-                .poller = std.io.poll(
-                    allocator,
-                    PollStreams,
-                    .{ .GdbConnection = client, },
-                ),
                 .cpu_state = .Paused,
                 .debug_interface = debug_interface,
                 .tick = 0,
@@ -199,10 +188,8 @@ pub fn GdbDebugServer(opt: CpuOptions) type {
         pub fn deinit(self: *Self) void {
             self.rx_buffer.deinit();
             self.breakpoints.deinit();
-            self.allocator.deinit(self.socket_path);
             std.posix.close(self.socket_fd);
             self.client.close();
-            self.poller.deinit();
         }
 
         pub fn poll(self: *Self, cpu: *RVCPU(opt)) !bool {

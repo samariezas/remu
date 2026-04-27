@@ -512,11 +512,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         sscratch: Tword,
 
         memory_reservation: ?MemoryReservation,
-        // gdb_connection: ?gdb_server.GdbDebugServer(opt),
+        gdb_connection: ?gdb_server.GdbDebugServer(opt),
         
         paging_enabled: bool,
         asid: u16,
         ppn: u44,
+
         instruction_cache: TICache,
 
         fn shiftLen() type {
@@ -1468,6 +1469,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return self.getNextInstructionHandlerWithCache();
         }
 
+        fn runHandler(self: *Self, instruction_handle: *const Instr, instruction: u32) ?TError {
+            return instruction_handle.handler(self, instruction);
+        }
+
         fn executeInstruction(self: *Self) DebugPrintError!?TError {
             std.debug.assert(!self.isHalted());
             std.debug.assert(self.registers[0] == 0);
@@ -1477,16 +1482,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 return null;
             }
 
-            // if (self.pc == 0xffffffff804889bc) {
-            //     @breakpoint();
-            // }
-            // if (self.pc == 0xffffffff804889d0) {
-            //     @breakpoint();
-            // }
-
             switch (self.getNextInstructionHandler()) {
                 .Success => |*instruction| {
-                    const execution_error = instruction.handler.handler(self, instruction.instruction);
+                    const execution_error = self.runHandler(instruction.handler, instruction.instruction);
                     if (execution_error) |err| {
                         return err;
                     }
@@ -1505,12 +1503,12 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         pub fn tick(self: *Self) !void {
-            // if (self.gdb_connection) |*conn| {
-            //     const continue_running = conn.poll(self) catch @panic("IO error");
-            //     if (!continue_running) {
-            //         return;
-            //     }
-            // }
+            if (self.gdb_connection) |*conn| {
+                const continue_running = conn.poll(self) catch @panic("IO error");
+                if (!continue_running) {
+                    return;
+                }
+            }
             try self._bus.handleIo();
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
@@ -1669,14 +1667,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             cpu_bus: Bus(Tword),
             debug_writer: ?std.io.AnyWriter,
             signature_info: ?SignatureInfo,
-            // debugger_filepath: ?[]const u8,
+            debugger_filepath: ?[]const u8,
         ) !RVCPU(opt) {
-            // const gdb_connection = if (debugger_filepath) |debugger_path|
-            //     try gdb_server.GdbDebugServer(opt).init(
-            //         allocator,
-            //         debugger_path,
-            //         Self.makeDebugInterface()
-            //     ) else null;
+            const gdb_connection = if (debugger_filepath) |debugger_path|
+                try gdb_server.GdbDebugServer(opt).init(
+                    allocator,
+                    debugger_path,
+                    Self.makeDebugInterface()
+                ) else null;
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
@@ -1713,7 +1711,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .mscratch = 0,
                 .sscratch = 0,
                 .memory_reservation = null,
-                // .gdb_connection = gdb_connection,
+                .gdb_connection = gdb_connection,
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
@@ -1723,6 +1721,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         pub fn deinit(self: *Self) void {
             self._bus.deinit(self.allocator);
+            self.instruction_cache.deinit();
         }
 
         pub fn isHalted(self: *Self) bool {

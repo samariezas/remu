@@ -82,7 +82,7 @@ if $USE_PERF; then
     COMMAND+=(
         perf record
         --call-graph fp
-        -D 3000-23000
+        -D 3000-48000
     )
 fi
 

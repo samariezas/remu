@@ -49,7 +49,7 @@ pub fn main() !u8 {
         const initrd_path = args.next() orelse @panic("Missing initrd argument");
         const gdb_socket = args.next();
         std.debug.assert(!args.skip());
-        const result = try tests.runRemuBinary(
+        try tests.runRemuBinary(
             tests.full64,
             allocator,
             opensbi_path,
@@ -61,7 +61,6 @@ pub fn main() !u8 {
             std.io.getStdOut(),
             gdb_socket
         );
-        defer result.deinit(allocator);
     // } else if (std.mem.eql(u8, run_type, "single")) {
     //     const image = args.next() orelse @panic("Missing image argument");
     //     std.debug.assert(!args.skip());

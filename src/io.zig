@@ -24,16 +24,18 @@ pub const BufferedReader = struct {
 
     file: File,
     buffer: RingBuffer,
+    allocator: Allocator,
 
     fn init(allocator: Allocator, file: File) !Self {
         return Self {
             .file = file,
             .buffer = try RingBuffer.init(allocator, BUFFER_CAPACITY),
+            .allocator = allocator,
         };
     }
 
     fn deinit(self: *Self) void {
-        self.read_buffer.deinit();
+        self.buffer.deinit(self.allocator);
     }
 
     fn handleIo(self: *Self) !void {
@@ -60,16 +62,18 @@ pub const BufferedWriter = struct {
 
     file: File,
     buffer: std.RingBuffer,
+    allocator: Allocator,
 
     fn init(allocator: Allocator, file: File) !Self {
         return Self {
             .file = file,
             .buffer = try RingBuffer.init(allocator, BUFFER_CAPACITY),
+            .allocator = allocator,
         };
     }
 
     fn deinit(self: *Self) void {
-        self.read_buffer.deinit();
+        self.buffer.deinit(self.allocator);
     }
 
     fn handleIo(self: *Self) !void {
@@ -107,6 +111,11 @@ const BufferedReaderWriter = struct {
             .reader = try BufferedReader.init(allocator, file),
             .writer = try BufferedWriter.init(allocator, file),
         };
+    }
+
+    fn deinit(self: *Self) void {
+        self.reader.deinit();
+        self.writer.deinit();
     }
 
     fn handleIo(self: *Self) !void {
@@ -185,9 +194,9 @@ pub const IoHandler = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.serial_read) |b| b.deinit();
-        if (self.serial_write) |b| b.deinit();
-        if (self.gdb) |b| b.deinit();
+        if (self.serial_read) |*b| b.deinit();
+        if (self.serial_write) |*b| b.deinit();
+        if (self.gdb) |*b| b.deinit();
     }
 
     fn handleReadIo(self: *Self, comptime device: IoDevice) !void {
