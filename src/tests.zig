@@ -1,6 +1,7 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
 const bus = @import("bus.zig");
+const io = @import("io.zig");
 const libelf = @import("libelf.zig");
 const cpu_config = cpu.cpu_config;
 const fs = std.fs;
@@ -9,6 +10,7 @@ const posix = std.posix;
 const linux = std.os.linux;
 const ArrayList = std.ArrayList;
 const Allocator = mem.Allocator;
+const File = std.fs.File;
 const WordSize = cpu_config.WordSize;
 const CpuOptions = cpu_config.CpuOptions;
 
@@ -232,58 +234,58 @@ const RemuRunResult = struct {
     }
 };
 
-pub fn runRemu(
-    comptime opt: CpuOptions,
-    allocator: Allocator,
-    image: []const u8,
-    debug_writer: ?std.io.AnyWriter,
-    serial_writer: std.io.AnyWriter,
-    debugger_filepath: ?[]const u8,
-) !RemuRunResult {
-    const f = try std.fs.cwd().openFile(
-        image, .{ .mode = .read_only }
-    );
-    defer f.close();
-    var elf_file = try libelf.Elf(opt.word_size).load(f);
-    const signature_info = try elf_file.getSymbolsMultiple(
-        &[_][:0]const u8{"begin_signature", "end_signature", "tohost"}
-    ) orelse @panic("Failed reading signature data");
-    const cpu_type = cpu.RVCPU(opt);
-    const memory_start: cpu_type.Tword = 0x8000_0000;
-    const memory_size: cpu_type.Tword = 1024*1024*256;
-    var rvcpu = try cpu_type.init(
-        allocator,
-        elf_file.getEntrypoint(),
-        memory_start,
-        memory_size,
-        debug_writer,
-        .{ 
-            .signature_start = signature_info.begin_signature.address,
-            .signature_end = signature_info.end_signature.address,
-            .tohost_address = signature_info.tohost.address,
-        },
-        serial_writer,
-        null,
-        debugger_filepath,
-    );
-    defer rvcpu.deinit();
-    var it = try elf_file.get_loadable_it();
-    while (it.next()) |segment| {
-        try rvcpu.loadData(segment.start_address, segment.data);
-        const offset: cpu_type.Tword = @intCast(segment.data.len);
-        try rvcpu.loadZeroes(segment.start_address + offset, segment.padding);
-    }
-    while (!rvcpu.isHalted()) {
-        try rvcpu.tick();
-    }
-    const signature = try rvcpu.getSignature(allocator);
-    const failure_code = rvcpu.getTestFailureCode();
-    const failure_code_u64: ?u64 = if (failure_code) |code| @intCast(code) else null;
-    return .{
-        .failure_code = failure_code_u64,
-        .signature = signature,
-    };
-}
+// pub fn runRemu(
+//     comptime opt: CpuOptions,
+//     allocator: Allocator,
+//     image: []const u8,
+//     debug_writer: ?std.io.AnyWriter,
+//     serial_writer: std.io.AnyWriter,
+//     debugger_filepath: ?[]const u8,
+// ) !RemuRunResult {
+//     const f = try std.fs.cwd().openFile(
+//         image, .{ .mode = .read_only }
+//     );
+//     defer f.close();
+//     var elf_file = try libelf.Elf(opt.word_size).load(f);
+//     const signature_info = try elf_file.getSymbolsMultiple(
+//         &[_][:0]const u8{"begin_signature", "end_signature", "tohost"}
+//     ) orelse @panic("Failed reading signature data");
+//     const cpu_type = cpu.RVCPU(opt);
+//     const memory_start: cpu_type.Tword = 0x8000_0000;
+//     const memory_size: cpu_type.Tword = 1024*1024*256;
+//     var rvcpu = try cpu_type.init(
+//         allocator,
+//         elf_file.getEntrypoint(),
+//         memory_start,
+//         memory_size,
+//         debug_writer,
+//         .{ 
+//             .signature_start = signature_info.begin_signature.address,
+//             .signature_end = signature_info.end_signature.address,
+//             .tohost_address = signature_info.tohost.address,
+//         },
+//         serial_writer,
+//         null,
+//         debugger_filepath,
+//     );
+//     defer rvcpu.deinit();
+//     var it = try elf_file.get_loadable_it();
+//     while (it.next()) |segment| {
+//         try rvcpu.loadData(segment.start_address, segment.data);
+//         const offset: cpu_type.Tword = @intCast(segment.data.len);
+//         try rvcpu.loadZeroes(segment.start_address + offset, segment.padding);
+//     }
+//     while (!rvcpu.isHalted()) {
+//         try rvcpu.tick();
+//     }
+//     const signature = try rvcpu.getSignature(allocator);
+//     const failure_code = rvcpu.getTestFailureCode();
+//     const failure_code_u64: ?u64 = if (failure_code) |code| @intCast(code) else null;
+//     return .{
+//         .failure_code = failure_code_u64,
+//         .signature = signature,
+//     };
+// }
 
 fn alignOnPage(T: type, i: *T) void {
     const page_size: T = 4096;
@@ -322,9 +324,12 @@ pub fn runRemuBinary(
     kernel_path: []const u8,
     initrd_path: []const u8,
     debug_writer: ?std.io.AnyWriter,
-    serial_writer: std.io.AnyWriter,
+    serial_reader: File,
+    serial_writer: File,
     gdb_socket_path: ?[]const u8,
 ) !RemuRunResult {
+    _ = gdb_socket_path;
+    var io_handler = try io.IoHandler.init(allocator, serial_reader, serial_writer, null);
     const cpu_type = cpu.RVCPU(opt);
     const Tword = cpu_type.Tword;
     const FwDynamicInfo = packed struct {
@@ -344,30 +349,34 @@ pub fn runRemuBinary(
     const cpu_bus = try bus.Bus(Tword).init(
         allocator,
         &[_]BusCfg {
+            BusCfg.makePlic(0xc00_0000),
             BusCfg.makeMemory(opensbi_start,    64*1024*1024),  // 64M  for OpenSBI
             BusCfg.makeMemory(kernel_start,     512*1024*1024), // 512M for Linux
             BusCfg.makeMemory(initrd_start,     64*1024*1024),  // 64M  for initrd
             BusCfg.makeMemory(dtb_start,        8*1024*1024),   // 8M   for DTB, FwDynamicInfo
-            BusCfg.makeSerial(0x1000_0000, serial_writer),
+            BusCfg.makeSerial(
+                0x1000_0000,
+                io_handler.getSerialReader(),
+                io_handler.getSerialWriter()
+            ),
             BusCfg.makeClint(0x200_0000),
-            BusCfg.makePlic(0xc00_0000),
         },
+        &io_handler
     );
 
-    const stdin = std.io.getStdIn();
-    const stdin_reader = stdin.reader();
-    const any_stdin_reader = stdin_reader.any();
-    const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
-    _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | linux.IN.NONBLOCK);
+    // const stdin = std.io.getStdIn();
+    // const stdin_reader = stdin.reader();
+    // const any_stdin_reader = stdin_reader.any();
+    // const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
+    // _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | linux.IN.NONBLOCK);
 
     var rvcpu = try cpu_type.initWithBus(
         allocator,
         opensbi_start,
         cpu_bus,
         debug_writer,
-        any_stdin_reader,
         null,
-        gdb_socket_path,
+        // gdb_socket_path,
     );
     defer rvcpu.deinit();
 
@@ -414,23 +423,23 @@ const CollectedRemuRunResult = struct {
     }
 };
 
-pub fn runRemuAndCollectSerial(
-    comptime opt: CpuOptions,
-    allocator: Allocator,
-    image: []const u8,
-    debug_writer: ?std.io.AnyWriter,
-    debugger_filepath: ?[]const u8,
-) !CollectedRemuRunResult {
-    var serial_output = std.ArrayList(u8).init(allocator);
-    defer serial_output.deinit();
-    const serial_writer = serial_output.writer().any();
-    const remu_result = try runRemu(opt, allocator, image, debug_writer, serial_writer, debugger_filepath);
-    return .{
-        .failure_code = remu_result.failure_code,
-        .signature = remu_result.signature,
-        .serial_output = try serial_output.toOwnedSlice(),
-    };
-}
+// pub fn runRemuAndCollectSerial(
+//     comptime opt: CpuOptions,
+//     allocator: Allocator,
+//     image: []const u8,
+//     debug_writer: ?std.io.AnyWriter,
+//     debugger_filepath: ?[]const u8,
+// ) !CollectedRemuRunResult {
+//     var serial_output = std.ArrayList(u8).init(allocator);
+//     defer serial_output.deinit();
+//     const serial_writer = serial_output.writer().any();
+//     const remu_result = try runRemu(opt, allocator, image, debug_writer, serial_writer, debugger_filepath);
+//     return .{
+//         .failure_code = remu_result.failure_code,
+//         .signature = remu_result.signature,
+//         .serial_output = try serial_output.toOwnedSlice(),
+//     };
+// }
 
 fn stringCmp(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
@@ -512,17 +521,17 @@ const RunDiscrepancy = union(enum) {
     }
 };
 
-pub fn runSingle(
-    comptime opt: CpuOptions,
-    allocator: Allocator,
-    image: []const u8,
-    debug_writer: ?std.io.AnyWriter,
-) !RunDiscrepancy {
-    const spike_result = try runSpike(allocator, opt.word_size, image);
-    errdefer spike_result.deinit(allocator);
-    const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer, null);
-    return RunDiscrepancy.init(allocator, spike_result, remu_result);
-}
+// pub fn runSingle(
+//     comptime opt: CpuOptions,
+//     allocator: Allocator,
+//     image: []const u8,
+//     debug_writer: ?std.io.AnyWriter,
+// ) !RunDiscrepancy {
+//     const spike_result = try runSpike(allocator, opt.word_size, image);
+//     errdefer spike_result.deinit(allocator);
+//     const remu_result = try runRemuAndCollectSerial(opt, allocator, image, debug_writer, null);
+//     return RunDiscrepancy.init(allocator, spike_result, remu_result);
+// }
 
 pub fn printDiff(
     allocator: Allocator,
@@ -585,90 +594,90 @@ pub fn printDiff(
     _ = posix.waitpid(child_pid, 0);
 }
 
-pub fn runMulti(
-    comptime opt: CpuOptions,
-    allocator: Allocator,
-    result_allocator: Allocator,
-    start: []const u8,
-    path: []const u8,
-    writer: std.io.AnyWriter
-) !TestSuiteResult {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_allocator = arena.allocator();
-
-    const cwd = std.fs.cwd();
-    const dest_dir = try cwd.openDir(path, .{ .iterate = true });
-    const items = try findAll(arena_allocator, start, dest_dir);
-
-    var total_tests: usize = 0;
-    var passed_tests: usize = 0;
-
-    var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
-    for (items) |i| {
-        const image_path = try std.fs.path.join(
-            allocator,
-            &[_][]const u8 { path, i }
-        );
-        defer allocator.free(image_path);
-        try writer.print("Running {s}\n", .{i});
-        const spike_result = try runSpike(allocator, opt.word_size, image_path);
-        defer spike_result.deinit(allocator);
-        if (spike_result.isFailure()) {
-            @panic("Running spike failed!");
-        }
-        const pid = linux.fork();
-        if (pid == 0) {
-            const rl = linux.rlimit {
-                .cur = 1,
-                .max = 1,
-            };
-            std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
-
-            const remu_result = try runRemuAndCollectSerial(opt, allocator, image_path, null, null);
-            const run_result = RunDiscrepancy.init(allocator, spike_result, remu_result);
-            const process_exit_code: u8 = switch (run_result) {
-                .Discrepancy => 1,
-                .NoDiscrepancy => 0,
-            };
-            std.process.exit(process_exit_code);
-        } else {
-            var status: u32 = 0;
-            std.debug.assert(linux.waitpid(@intCast(pid), &status, 0) == pid);
-            const success = linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
-            try writer.print("t={s}, success={}\n", .{i, success});
-            if (success) {
-                passed_tests += 1;
-            } else {
-                try failed_tests.append(i);
-            }
-        }
-        total_tests += 1;
-    }
-    var result = TestSuiteResult {
-        .total_tests = total_tests,
-        .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
-    };
-    for (failed_tests.items, 0..) |t, i| {
-        result.failed_tests[i] = try result_allocator.dupe(u8, t);
-    }
-    return result;
-}
-
-pub fn runMultipleSuites(
-    allocator: Allocator,
-    result_allocator: Allocator,
-    path: []const u8,
-    writer: std.io.AnyWriter
-) !void {
-    const results = [_]TestSuiteResult {
-        // TODO: bring back 32bit
-        // try runMulti(priv32, allocator, result_allocator, "rv32ui-p", path, writer),
-        try runMulti(priv64, allocator, result_allocator, "rv64ui-p", path, writer),
-        // try runMulti(priv32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
-        try runMulti(priv64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
-        // try runMulti(priv32.withA(), allocator, result_allocator, "rv64um-p", path, writer),
-        try runMulti(priv64.withA(), allocator, result_allocator, "rv64ua-p", path, writer),
-    };
-    try printResults(&results, writer);
-}
+// pub fn runMulti(
+//     comptime opt: CpuOptions,
+//     allocator: Allocator,
+//     result_allocator: Allocator,
+//     start: []const u8,
+//     path: []const u8,
+//     writer: std.io.AnyWriter
+// ) !TestSuiteResult {
+//     var arena = std.heap.ArenaAllocator.init(allocator);
+//     defer arena.deinit();
+//     const arena_allocator = arena.allocator();
+//
+//     const cwd = std.fs.cwd();
+//     const dest_dir = try cwd.openDir(path, .{ .iterate = true });
+//     const items = try findAll(arena_allocator, start, dest_dir);
+//
+//     var total_tests: usize = 0;
+//     var passed_tests: usize = 0;
+//
+//     var failed_tests = std.ArrayList([]const u8).init(arena_allocator);
+//     for (items) |i| {
+//         const image_path = try std.fs.path.join(
+//             allocator,
+//             &[_][]const u8 { path, i }
+//         );
+//         defer allocator.free(image_path);
+//         try writer.print("Running {s}\n", .{i});
+//         const spike_result = try runSpike(allocator, opt.word_size, image_path);
+//         defer spike_result.deinit(allocator);
+//         if (spike_result.isFailure()) {
+//             @panic("Running spike failed!");
+//         }
+//         const pid = linux.fork();
+//         if (pid == 0) {
+//             const rl = linux.rlimit {
+//                 .cur = 1,
+//                 .max = 1,
+//             };
+//             std.debug.assert(linux.setrlimit(linux.rlimit_resource.CPU, &rl) == 0);
+//
+//             const remu_result = try runRemuAndCollectSerial(opt, allocator, image_path, null, null);
+//             const run_result = RunDiscrepancy.init(allocator, spike_result, remu_result);
+//             const process_exit_code: u8 = switch (run_result) {
+//                 .Discrepancy => 1,
+//                 .NoDiscrepancy => 0,
+//             };
+//             std.process.exit(process_exit_code);
+//         } else {
+//             var status: u32 = 0;
+//             std.debug.assert(linux.waitpid(@intCast(pid), &status, 0) == pid);
+//             const success = linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 0;
+//             try writer.print("t={s}, success={}\n", .{i, success});
+//             if (success) {
+//                 passed_tests += 1;
+//             } else {
+//                 try failed_tests.append(i);
+//             }
+//         }
+//         total_tests += 1;
+//     }
+//     var result = TestSuiteResult {
+//         .total_tests = total_tests,
+//         .failed_tests = try result_allocator.alloc([]const u8, failed_tests.items.len),
+//     };
+//     for (failed_tests.items, 0..) |t, i| {
+//         result.failed_tests[i] = try result_allocator.dupe(u8, t);
+//     }
+//     return result;
+// }
+//
+// pub fn runMultipleSuites(
+//     allocator: Allocator,
+//     result_allocator: Allocator,
+//     path: []const u8,
+//     writer: std.io.AnyWriter
+// ) !void {
+//     const results = [_]TestSuiteResult {
+//         // TODO: bring back 32bit
+//         // try runMulti(priv32, allocator, result_allocator, "rv32ui-p", path, writer),
+//         try runMulti(priv64, allocator, result_allocator, "rv64ui-p", path, writer),
+//         // try runMulti(priv32.withM(), allocator, result_allocator, "rv32um-p", path, writer),
+//         try runMulti(priv64.withM(), allocator, result_allocator, "rv64um-p", path, writer),
+//         // try runMulti(priv32.withA(), allocator, result_allocator, "rv64um-p", path, writer),
+//         try runMulti(priv64.withA(), allocator, result_allocator, "rv64ua-p", path, writer),
+//     };
+//     try printResults(&results, writer);
+// }

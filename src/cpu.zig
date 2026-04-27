@@ -1,5 +1,7 @@
 const std = @import("std");
 const bus = @import("bus.zig");
+const io = @import("io.zig");
+const IoHandler = io.IoHandler;
 pub const privilege = @import("privilege.zig");
 pub const cpu_config = @import("cpu_config.zig");
 const gdb_server = @import("gdb_server.zig");
@@ -434,59 +436,6 @@ fn ExecutionError(Tword: type) type {
 
 const DebugPrintError = error { WriteFailed };
 
-const SerialReader = struct {
-    const Self = @This();
-
-    reader: std.io.AnyReader,
-    buffer: std.ArrayList(u8),
-    tick_counter: usize,
-
-    fn init(allocator: Allocator, reader: std.io.AnyReader) Self {
-        return .{
-            .reader = reader,
-            .buffer = std.ArrayList(u8).init(allocator),
-            .tick_counter = 0,
-        };
-    }
-
-    fn popFromBuffer(self: *Self, dest: []u8) ![]u8 {
-        std.debug.assert(self.buffer.items.len > 0);
-        const len_to_copy = @min(self.buffer.items.len, dest.len);
-        @memcpy(dest[0..len_to_copy], self.buffer.items[0..len_to_copy]);
-        const retval = dest[0..len_to_copy];
-        const items_remaining = self.buffer.items.len - len_to_copy;
-        const update_dest = self.buffer.items[0..items_remaining];
-        const update_src  = self.buffer.items[len_to_copy..];
-        std.debug.assert(update_dest.len == update_src.len);
-        std.mem.copyForwards(
-            u8,
-            update_dest,
-            update_src
-        );
-        self.buffer.shrinkRetainingCapacity(items_remaining);
-        return retval;
-    }
-
-    fn tryReading(self: *Self, dest: []u8) ![]u8 {
-        if (self.buffer.items.len > 0) {
-            return self.popFromBuffer(dest);
-        } else if (self.tick_counter < 1000) {
-            self.tick_counter += 1;
-            return &.{};
-        } else {
-            self.tick_counter = 0;
-            var buffer: [4096]u8 = undefined;
-            const read_cnt: usize = self.reader.read(&buffer) catch |err| switch(err) {
-                error.WouldBlock => 0,
-                else => return err,
-            };
-            if (read_cnt == 0) return &.{};
-            try self.buffer.appendSlice(buffer[0..read_cnt]);
-            return self.popFromBuffer(dest);
-        }
-    }
-};
-
 pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
     const SignatureInfo = struct {
         signature_start: opt.getTword(),
@@ -524,7 +473,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pc: Tword,
         _bus: Bus(Tword),
         test_result: ?TestResult(Tword),
-        writer: ?std.io.AnyWriter,
+        debug_writer: ?std.io.AnyWriter,
         // TODO: refactor everything used for testing (signatures, tohost, results)
         signature_info: ?SignatureInfo,
 
@@ -558,13 +507,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         sscratch: Tword,
 
         memory_reservation: ?MemoryReservation,
-        gdb_connection: ?gdb_server.GdbDebugServer(opt),
+        // gdb_connection: ?gdb_server.GdbDebugServer(opt),
         
         paging_enabled: bool,
         asid: u16,
         ppn: u44,
-
-        serial_reader: ?SerialReader,
 
         const Instr = InstructionDescriptor(opt);
 
@@ -1095,7 +1042,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleReadTime(cpu: *Self) Tword {
-            return @truncate(cpu._bus.findClint().?.getMtime());
+            return @truncate(cpu._bus.getMtime());
         }
 
         fn handleReadMisa(_: *const Self) Tword {
@@ -1191,7 +1138,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         };
 
         fn debugPrint(self: *const Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
-            if (self.writer) |writer| {
+            if (self.debug_writer) |writer| {
                 writer.print(format, args) catch return error.WriteFailed;
             }
         }
@@ -1362,21 +1309,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 );
             }
 
-            if (self.serial_reader) |*reader| {
-                if (self._bus.findSerialDevice()) |serial| {
-                    if (!serial.hasRx()) {
-                        var buffer: [16]u8 = undefined;
-                        const read_from_stdin = reader.tryReading(&buffer) catch @panic("Failed reading serial input");
-                        if (read_from_stdin.len > 0) {
-                            self._bus.pushSerialInput(read_from_stdin);
-                        }
-                    }
-                }
-            }
-
-            // Standard, controller-agnostic CPU view:
-            // external interrupt lines may be driven by a controller, but the CPU
-            // only consumes architectural pending bits.
             if (self._bus.findPlic()) |plic| {
                 self.setInterruptPending(.machine_external, plic.shouldTrap(0));
                 self.setInterruptPending(.supervisor_external, plic.shouldTrap(1));
@@ -1505,14 +1437,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             try self.debugPrint(" Instr=0x{x:0>8}\n", .{instruction});
             try self.debugPrint("Opcode=0b{b:0>7}; funct3=0x{X} funct7=0x{X}\n", .{instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
             if (Self.findMatchingInstruction(instruction_id)) |i| {
-                if (self.writer) |writer| {
+                if (self.debug_writer) |writer| {
                     i.print(writer, instruction, self.pc) catch return error.WriteFailed;
                 }
                 const execution_error = i.handler(self, instruction);
                 if (execution_error) |err| {
                     return err;
                 }
-                if (self.writer) |writer| {
+                if (self.debug_writer) |writer| {
                     self.writeRegisters(writer, 4) catch return error.WriteFailed;
                 }
                 if (i.advance_pc) {
@@ -1525,13 +1457,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return TError { .IllegalInstruction = @intCast(instruction) };
         }
 
-        pub fn tick(self: *Self) DebugPrintError!void {
-            if (self.gdb_connection) |*conn| {
-                const continue_running = conn.poll(self) catch @panic("IO error");
-                if (!continue_running) {
-                    return;
-                }
-            }
+        pub fn tick(self: *Self) !void {
+            // if (self.gdb_connection) |*conn| {
+            //     const continue_running = conn.poll(self) catch @panic("IO error");
+            //     if (!continue_running) {
+            //         return;
+            //     }
+            // }
+            try self._bus.handleIo();
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
                 self.trap(err);
@@ -1683,58 +1616,27 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             };
         }
 
-        pub fn init(
-            allocator: Allocator,
-            entrypoint: Tword,
-            memory_start: Tword,
-            memory_length: Tword,
-            writer: ?std.io.AnyWriter,
-            signature_info: ?SignatureInfo,
-            serial_writer: std.io.AnyWriter,
-            serial_reader: ?std.io.AnyReader,
-            debugger_filepath: ?[]const u8,
-        ) !RVCPU(opt) {
-            const memory_device = BusDeviceConfig(Tword).makeMemory(memory_start, memory_length);
-            const serial_device = BusDeviceConfig(Tword).makeSerial(0x10000000, serial_writer);
-            const plic_device = BusDeviceConfig(Tword).makePlic(0xc000000);
-            const cpu_bus = try Bus(Tword).init(allocator, &[_]BusDeviceConfig(Tword) {
-                memory_device,
-                serial_device,
-                plic_device,
-            });
-            return Self.initWithBus(
-                allocator,
-                entrypoint,
-                cpu_bus,
-                writer,
-                serial_reader,
-                signature_info,
-                debugger_filepath
-            );
-        }
-
         pub fn initWithBus(
             allocator: Allocator,
             entrypoint: Tword,
             cpu_bus: Bus(Tword),
-            writer: ?std.io.AnyWriter,
-            serial_reader: ?std.io.AnyReader,
+            debug_writer: ?std.io.AnyWriter,
             signature_info: ?SignatureInfo,
-            debugger_filepath: ?[]const u8,
+            // debugger_filepath: ?[]const u8,
         ) !RVCPU(opt) {
-            const gdb_connection = if (debugger_filepath) |debugger_path|
-                try gdb_server.GdbDebugServer(opt).init(
-                    allocator,
-                    debugger_path,
-                    Self.makeDebugInterface()
-                ) else null;
+            // const gdb_connection = if (debugger_filepath) |debugger_path|
+            //     try gdb_server.GdbDebugServer(opt).init(
+            //         allocator,
+            //         debugger_path,
+            //         Self.makeDebugInterface()
+            //     ) else null;
             return .{
                 .allocator = allocator,
                 .registers = std.mem.zeroes([32]Tword),
                 .pc = entrypoint,
                 ._bus = cpu_bus,
                 .test_result = null,
-                .writer = writer,
+                .debug_writer = debug_writer,
                 .signature_info = signature_info,
                 .m_trap_handler_address = 0,
                 .m_trap_mode = .Direct,
@@ -1764,11 +1666,10 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .mscratch = 0,
                 .sscratch = 0,
                 .memory_reservation = null,
-                .gdb_connection = gdb_connection,
+                // .gdb_connection = gdb_connection,
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
-                .serial_reader = if (serial_reader) |rd| SerialReader.init(allocator, rd) else null,
             };
         }
 
