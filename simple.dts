@@ -9,7 +9,7 @@
     stdout-path = &SERIAL0;
     bootargs = "console=ttyS0 earlycon";
     linux,initrd-start = <0xa0000000>;
-    linux,initrd-end =   <0xa04f7400>;
+    linux,initrd-end =   <0xa04fb800>;
   };
   cpus {
     #address-cells = <1>;
