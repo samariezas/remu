@@ -16,6 +16,7 @@ pub const CpuOptions = struct {
     word_size: WordSize,
     m_extension: bool,
     a_extension: bool,
+    qpu_extension: bool,
     privileged: bool,
 
     pub fn makeBase(word_size: WordSize) CpuOptions {
@@ -23,6 +24,7 @@ pub const CpuOptions = struct {
             .word_size = word_size,
             .m_extension = false,
             .a_extension = false,
+            .qpu_extension = false,
             .privileged = false,
         };
     }
@@ -36,6 +38,12 @@ pub const CpuOptions = struct {
     pub fn withA(self: Self) Self {
         var new = self;
         new.a_extension = true;
+        return new;
+    }
+
+    pub fn withQpu(self: Self) Self {
+        var new = self;
+        new.qpu_extension = true;
         return new;
     }
 

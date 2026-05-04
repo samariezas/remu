@@ -1,0 +1,525 @@
+diff --git a/arch/riscv/include/asm/csr.h b/arch/riscv/include/asm/csr.h
+index 4a37a9839..2db689cd5 100644
+--- a/arch/riscv/include/asm/csr.h
++++ b/arch/riscv/include/asm/csr.h
+@@ -444,6 +444,8 @@
+ #define CSR_VTYPE		0xc21
+ #define CSR_VLENB		0xc22
+ 
++#define CSR_QPU_CTX		0x9da
++
+ /* Scalar Crypto Extension - Entropy */
+ #define CSR_SEED		0x015
+ #define SEED_OPST_MASK		_AC(0xC0000000, UL)
+diff --git a/arch/riscv/include/asm/processor.h b/arch/riscv/include/asm/processor.h
+index da5426122..35a538ec7 100644
+--- a/arch/riscv/include/asm/processor.h
++++ b/arch/riscv/include/asm/processor.h
+@@ -16,6 +16,7 @@
+ #include <asm/insn-def.h>
+ #include <asm/alternative-macros.h>
+ #include <asm/hwcap.h>
++#include <asm/qpu.h>
+ 
+ #define arch_get_mmap_end(addr, len, flags)			\
+ ({								\
+@@ -115,6 +116,7 @@ struct thread_struct {
+ 	u32 vstate_ctrl;
+ 	struct __riscv_v_ext_state vstate;
+ 	unsigned long align_ctl;
++	struct __riscv_qpu_ext_state qpu;
+ 	struct __riscv_v_ext_state kernel_vstate;
+ #ifdef CONFIG_SMP
+ 	/* Flush the icache on migration */
+diff --git a/arch/riscv/include/asm/qpu.h b/arch/riscv/include/asm/qpu.h
+new file mode 100644
+index 000000000..858f10eb2
+--- /dev/null
++++ b/arch/riscv/include/asm/qpu.h
+@@ -0,0 +1,55 @@
++#ifndef _ASM_RISCV_QPU_H
++#define _ASM_RISCV_QPU_H
++
++#include <linux/bits.h>
++#include <linux/stddef.h>
++#include <linux/types.h>
++
++#ifndef __ASSEMBLY__
++
++struct pt_regs;
++struct task_struct;
++
++enum riscv_qpu_status {
++	RISCV_QPU_OFF		= 0,
++	RISCV_QPU_INITIAL	= 1,
++	RISCV_QPU_CLEAN		= 2,
++	RISCV_QPU_DIRTY		= 3,
++};
++
++#define RISCV_QPU_THREAD_USED	BIT(0)
++
++struct __riscv_qpu_ext_state {
++	u64 context_id;
++	void *datap;
++	size_t size;
++	u32 status;
++	u32 flags;
++};
++
++void __switch_to_qpu(struct task_struct *prev, struct task_struct *next);
++bool riscv_qpu_first_use_handler(struct pt_regs *regs);
++
++int riscv_qpu_dup_task_struct(struct task_struct *dst,
++			      struct task_struct *src);
++void riscv_qpu_thread_free(struct task_struct *tsk);
++void riscv_qpu_flush_thread(struct task_struct *tsk);
++void riscv_qpu_kernel_thread_init(struct task_struct *tsk);
++
++
++bool riscv_qpu_insn_is_qpu(u32 insn);
++size_t riscv_qpu_arch_state_size(void);
++int riscv_qpu_arch_alloc_context(struct __riscv_qpu_ext_state *state);
++void riscv_qpu_arch_free_context(struct __riscv_qpu_ext_state *state);
++int riscv_qpu_arch_init_context(struct __riscv_qpu_ext_state *state);
++int riscv_qpu_arch_save_context(struct __riscv_qpu_ext_state *state);
++int riscv_qpu_arch_restore_context(struct __riscv_qpu_ext_state *state);
++int riscv_qpu_arch_clone_context(struct __riscv_qpu_ext_state *dst,
++				 struct __riscv_qpu_ext_state *src);
++bool riscv_qpu_arch_hw_dirty(void);
++int riscv_qpu_arch_enable_context(struct __riscv_qpu_ext_state *state);
++void riscv_qpu_arch_disable(void);
++
++#endif /* __ASSEMBLY__ */
++
++#endif /* _ASM_RISCV_QPU_H */
+diff --git a/arch/riscv/include/asm/switch_to.h b/arch/riscv/include/asm/switch_to.h
+index 0e71eb82f..03bd911b4 100644
+--- a/arch/riscv/include/asm/switch_to.h
++++ b/arch/riscv/include/asm/switch_to.h
+@@ -14,6 +14,7 @@
+ #include <asm/processor.h>
+ #include <asm/ptrace.h>
+ #include <asm/csr.h>
++#include <asm/qpu.h>
+ 
+ #ifdef CONFIG_FPU
+ extern void __fstate_save(struct task_struct *save_to);
+@@ -119,6 +120,7 @@ do {							\
+ 		__switch_to_fpu(__prev, __next);	\
+ 	if (has_vector() || has_xtheadvector())		\
+ 		__switch_to_vector(__prev, __next);	\
++	__switch_to_qpu(__prev, __next);		\
+ 	if (switch_to_should_flush_icache(__next))	\
+ 		local_flush_icache_all();		\
+ 	__switch_to_envcfg(__next);			\
+diff --git a/arch/riscv/kernel/Makefile b/arch/riscv/kernel/Makefile
+index f60fce69b..27207fef7 100644
+--- a/arch/riscv/kernel/Makefile
++++ b/arch/riscv/kernel/Makefile
+@@ -68,6 +68,7 @@ obj-y	+= stacktrace.o
+ obj-y	+= cacheinfo.o
+ obj-y	+= patch.o
+ obj-y	+= vendor_extensions.o
++obj-y   += qpu.o
+ obj-y	+= vendor_extensions/
+ obj-y	+= probes/
+ obj-y	+= tests/
+diff --git a/arch/riscv/kernel/process.c b/arch/riscv/kernel/process.c
+index 31a392993..e1b7ce4c6 100644
+--- a/arch/riscv/kernel/process.c
++++ b/arch/riscv/kernel/process.c
+@@ -29,6 +29,7 @@
+ #include <asm/thread_info.h>
+ #include <asm/cpuidle.h>
+ #include <asm/vector.h>
++#include <asm/qpu.h>
+ #include <asm/cpufeature.h>
+ #include <asm/exec.h>
+ 
+@@ -188,10 +189,12 @@ void flush_thread(void)
+ 	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SUPM))
+ 		envcfg_update_bits(current, ENVCFG_PMM, ENVCFG_PMM_PMLEN_0);
+ #endif
++	riscv_qpu_flush_thread(current);
+ }
+ 
+ void arch_release_task_struct(struct task_struct *tsk)
+ {
++	riscv_qpu_thread_free(tsk);
+ 	/* Free the vector context of datap. */
+ 	if (has_vector() || has_xtheadvector())
+ 		riscv_v_thread_free(tsk);
+@@ -199,12 +202,17 @@ void arch_release_task_struct(struct task_struct *tsk)
+ 
+ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
+ {
++	int ret;
++
+ 	fstate_save(src, task_pt_regs(src));
+ 	*dst = *src;
+ 	/* clear entire V context, including datap for a new task */
+ 	memset(&dst->thread.vstate, 0, sizeof(struct __riscv_v_ext_state));
+ 	memset(&dst->thread.kernel_vstate, 0, sizeof(struct __riscv_v_ext_state));
+ 	clear_tsk_thread_flag(dst, TIF_RISCV_V_DEFER_RESTORE);
++	ret = riscv_qpu_dup_task_struct(dst, src);
++	if (ret)
++		return ret;
+ 
+ 	return 0;
+ }
+@@ -238,6 +246,7 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
+ 	if (unlikely(args->fn)) {
+ 		/* Kernel thread */
+ 		memset(childregs, 0, sizeof(struct pt_regs));
++		riscv_qpu_kernel_thread_init(p);
+ 		/* Supervisor/Machine, irqs on: */
+ 		childregs->status = SR_PP | SR_PIE;
+ 
+diff --git a/arch/riscv/kernel/qpu.c b/arch/riscv/kernel/qpu.c
+new file mode 100644
+index 000000000..93cc1573c
+--- /dev/null
++++ b/arch/riscv/kernel/qpu.c
+@@ -0,0 +1,320 @@
++#include <linux/atomic.h>
++#include <linux/errno.h>
++#include <linux/percpu.h>
++#include <linux/sched.h>
++#include <linux/sched/signal.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++
++#include <asm/ptrace.h>
++#include <asm/qpu.h>
++#include <asm/csr.h>
++
++#define RISCV_QPU_INSTR(funct7) "0b0101011, 1, " funct7
++
++static DEFINE_PER_CPU(struct task_struct *, qpu_cpu_owner);
++
++/* -------------------------------------------------------------------------- */
++/* Instruction/backend stubs.  Replace these with your real emulator API.      */
++
++bool __weak riscv_qpu_insn_is_qpu(u32 insn)
++{
++	// compare opcode + funct3
++	const u32 insn_mask = 0x707f;
++	const u32 insn_compare = 0x102b;
++
++	// TODO: implement valid funct7 checking
++	return (insn & insn_mask) == insn_compare;
++}
++
++size_t __weak riscv_qpu_arch_state_size(void)
++{
++	/*
++	 * Stub: return the number of bytes required for a saved QPU context.
++	 * Return 0 if all state is host-side and addressed by context_id.
++	 */
++	return 0;
++}
++
++int __weak riscv_qpu_arch_alloc_context(struct __riscv_qpu_ext_state *state)
++{
++	unsigned long new_context_id;
++	asm volatile (
++	    ".insn r " RISCV_QPU_INSTR("1") ", %0, x0, x0"
++	    : "=r"(new_context_id)
++	);
++	state->context_id = new_context_id;
++	return 0;
++}
++
++void __weak riscv_qpu_arch_free_context(struct __riscv_qpu_ext_state *state)
++{
++	unsigned long context_id = state->context_id;
++	asm volatile (
++	    ".insn r " RISCV_QPU_INSTR("2") ", x0, %0, x0"
++	    : : "r"(context_id)
++	);
++}
++
++int __weak riscv_qpu_arch_init_context(struct __riscv_qpu_ext_state *state)
++{
++	/* Stub: initialize/reset context_id to the architectural initial state. */
++	return 0;
++}
++
++int __weak riscv_qpu_arch_save_context(struct __riscv_qpu_ext_state *state)
++{
++	/* Stub: serialize current hardware/emulator state into state->datap. */
++	return 0;
++}
++
++int __weak riscv_qpu_arch_restore_context(struct __riscv_qpu_ext_state *state)
++{
++	/* Stub: load state->datap or bind host-side state->context_id. */
++	return 0;
++}
++
++int __weak riscv_qpu_arch_clone_context(struct __riscv_qpu_ext_state *dst,
++					struct __riscv_qpu_ext_state *src)
++{
++	/* Stub: clone host-side src->context_id into dst->context_id, if needed. */
++	return 0;
++}
++
++bool __weak riscv_qpu_arch_hw_dirty(void)
++{
++	/* Stub: read an emulator dirty bit or status CSR. */
++	return false;
++}
++
++int riscv_qpu_arch_enable_context(struct __riscv_qpu_ext_state *state)
++{
++	csr_write(CSR_QPU_CTX, state->context_id);
++	return 0;
++}
++
++void riscv_qpu_arch_disable(void)
++{
++	csr_write(CSR_QPU_CTX, 0);
++}
++
++/* -------------------------------------------------------------------------- */
++
++static int qpu_alloc_state(struct __riscv_qpu_ext_state *state)
++{
++	size_t size;
++	int ret;
++
++	memset(state, 0, sizeof(*state));
++
++	size = riscv_qpu_arch_state_size();
++	if (size) {
++		state->datap = kzalloc(size, GFP_KERNEL);
++		if (!state->datap)
++			return -ENOMEM;
++		state->size = size;
++	}
++
++	ret = riscv_qpu_arch_alloc_context(state);
++	if (ret) {
++		kfree(state->datap);
++		memset(state, 0, sizeof(*state));
++		return ret;
++	}
++
++	state->status = RISCV_QPU_INITIAL;
++	state->flags = RISCV_QPU_THREAD_USED;
++	return 0;
++}
++
++static void qpu_free_state(struct __riscv_qpu_ext_state *state)
++{
++	if (!(state->flags & RISCV_QPU_THREAD_USED))
++		return;
++
++	riscv_qpu_arch_free_context(state);
++	kfree(state->datap);
++	memset(state, 0, sizeof(*state));
++}
++
++static int qpu_ensure_state(struct task_struct *tsk)
++{
++	if (tsk->thread.qpu.flags & RISCV_QPU_THREAD_USED)
++		return 0;
++
++	return qpu_alloc_state(&tsk->thread.qpu);
++}
++
++static void qpu_disable_cpu(void)
++{
++	riscv_qpu_arch_disable();
++	this_cpu_write(qpu_cpu_owner, NULL);
++}
++
++static int qpu_save_owner(struct task_struct *tsk)
++{
++	struct __riscv_qpu_ext_state *state = &tsk->thread.qpu;
++	int ret;
++
++	if (!(state->flags & RISCV_QPU_THREAD_USED))
++		return 0;
++
++	if (this_cpu_read(qpu_cpu_owner) != tsk)
++		return 0;
++
++	if (!riscv_qpu_arch_hw_dirty()) {
++		state->status = RISCV_QPU_CLEAN;
++		return 0;
++	}
++
++	ret = riscv_qpu_arch_save_context(state);
++	if (ret)
++		return ret;
++
++	state->status = RISCV_QPU_CLEAN;
++	return 0;
++}
++
++static int qpu_restore_current(void)
++{
++	struct __riscv_qpu_ext_state *state = &current->thread.qpu;
++	struct task_struct *owner;
++	int ret;
++
++	owner = this_cpu_read(qpu_cpu_owner);
++	if (owner == current)
++		return 0;
++
++	if (owner) {
++		ret = qpu_save_owner(owner);
++		if (ret)
++			return ret;
++		qpu_disable_cpu();
++	}
++
++	ret = qpu_ensure_state(current);
++	if (ret)
++		return ret;
++
++	if (state->status == RISCV_QPU_INITIAL)
++		ret = riscv_qpu_arch_init_context(state);
++	else
++		ret = riscv_qpu_arch_restore_context(state);
++	if (ret)
++		return ret;
++
++	ret = riscv_qpu_arch_enable_context(state);
++	if (ret)
++		return ret;
++
++	this_cpu_write(qpu_cpu_owner, current);
++	state->status = RISCV_QPU_CLEAN;
++	return 0;
++}
++
++static bool qpu_fetch_faulting_insn(struct pt_regs *regs, u32 *insn)
++{
++	const void __user *uaddr = (const void __user *)regs->epc;
++
++	if (copy_from_user_nofault(insn, uaddr, sizeof(*insn)))
++		return false;
++
++	/* QPU custom instructions are expected to be 32-bit encodings. */
++	if ((*insn & 0x3) != 0x3)
++		return false;
++
++	return true;
++}
++
++bool riscv_qpu_first_use_handler(struct pt_regs *regs)
++{
++	u32 insn;
++	int ret;
++
++	if (!user_mode(regs))
++		return false;
++
++	if (!qpu_fetch_faulting_insn(regs, &insn))
++		return false;
++
++	if (!riscv_qpu_insn_is_qpu(insn))
++		return false;
++
++	ret = qpu_restore_current();
++	if (ret) {
++		force_sig_fault(SIGBUS, BUS_OBJERR, (void __user *)regs->epc);
++		return true;
++	}
++
++	/* Leave regs->epc unchanged.  The QPU instruction will be retried. */
++	return true;
++}
++
++void __switch_to_qpu(struct task_struct *prev, struct task_struct *next)
++{
++	/*
++	 * Lazy restore policy:
++	 *   - save prev if this CPU currently owns its live QPU context,
++	 *   - disable QPU before entering next,
++	 *   - let next trap on first QPU instruction and restore there.
++	 */
++	WARN_ON_ONCE(qpu_save_owner(prev));
++	qpu_disable_cpu();
++}
++
++int riscv_qpu_dup_task_struct(struct task_struct *dst, struct task_struct *src)
++{
++	struct __riscv_qpu_ext_state *s = &src->thread.qpu;
++	struct __riscv_qpu_ext_state *d = &dst->thread.qpu;
++	int ret;
++
++	memset(d, 0, sizeof(*d));
++
++	if (!(s->flags & RISCV_QPU_THREAD_USED))
++		return 0;
++
++	/* If the parent owns live dirty hardware state, materialize it first. */
++	ret = qpu_save_owner(src);
++	if (ret)
++		return ret;
++
++	ret = qpu_alloc_state(d);
++	if (ret)
++		return ret;
++
++	d->status = s->status;
++	if (s->size) {
++		if (d->size != s->size) {
++			qpu_free_state(d);
++			return -EINVAL;
++		}
++		memcpy(d->datap, s->datap, s->size);
++	}
++
++	ret = riscv_qpu_arch_clone_context(d, s);
++	if (ret) {
++		qpu_free_state(d);
++		return ret;
++	}
++
++	return 0;
++}
++
++void riscv_qpu_thread_free(struct task_struct *tsk)
++{
++	if (tsk == current && this_cpu_read(qpu_cpu_owner) == tsk)
++		qpu_disable_cpu();
++	qpu_free_state(&tsk->thread.qpu);
++}
++
++void riscv_qpu_flush_thread(struct task_struct *tsk)
++{
++	if (tsk == current && this_cpu_read(qpu_cpu_owner) == tsk)
++		qpu_disable_cpu();
++	qpu_free_state(&tsk->thread.qpu);
++}
++
++void riscv_qpu_kernel_thread_init(struct task_struct *tsk)
++{
++	qpu_free_state(&tsk->thread.qpu);
++}
+diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
+index 80230de16..a50e963dc 100644
+--- a/arch/riscv/kernel/traps.c
++++ b/arch/riscv/kernel/traps.c
+@@ -32,6 +32,7 @@
+ #include <asm/syscall.h>
+ #include <asm/thread_info.h>
+ #include <asm/vector.h>
++#include <asm/qpu.h>
+ #include <asm/irq_stack.h>
+ 
+ int show_unhandled_signals = 1;
+@@ -179,6 +180,9 @@ asmlinkage __visible __trap_section void do_trap_insn_illegal(struct pt_regs *re
+ 		local_irq_enable();
+ 
+ 		handled = riscv_v_first_use_handler(regs);
++		if (!handled)
++			handled = riscv_qpu_first_use_handler(regs);
++
+ 		if (!handled)
+ 			do_trap_error(regs, SIGILL, ILL_ILLOPC, regs->epc,
+ 				      "Oops - illegal instruction");

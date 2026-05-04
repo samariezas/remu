@@ -1,16 +1,17 @@
 { pkgs, pkgsCross }:
 pkgsCross.stdenv.mkDerivation {
-  name = "floating";
+  name = "utils";
   version = "0.0.1";
-  src = ./floating;
+  src = ./utils;
 
   buildPhase = ''
     riscv64-unknown-linux-musl-gcc floating.c -o floating
+    riscv64-unknown-linux-musl-gcc qpu.c -o qpu
   '';
 
   installPhase = ''
     mkdir -p $out/bin
-    cp floating $out/bin
+    cp floating qpu $out/bin
   '';
 
   fixupPhase = ''

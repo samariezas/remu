@@ -1,6 +1,7 @@
 const std = @import("std");
 const bus = @import("bus.zig");
 const io = @import("io.zig");
+const qpu = @import("qpu.zig");
 const instruction_cache = @import("instruction_cache.zig");
 const IoHandler = io.IoHandler;
 pub const privilege = @import("privilege.zig");
@@ -518,6 +519,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         asid: u16,
         ppn: u44,
 
+        qpu_ctx: Tword,
+        qpu: qpu.Qpu(Tword),
+
         instruction_cache: TICache,
 
         fn shiftLen() type {
@@ -695,7 +699,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 Instr.makeF35("SC.W",      0b0101111, 0b010, 0b00011,  handleScW,  null),
                 Instr.makeF35("LR.D",      0b0101111, 0b011, 0b00010,  handleLrD,  null),
                 Instr.makeF35("SC.D",      0b0101111, 0b011, 0b00011,  handleScD,  null),
-            } else [_]Instr {});
+            } else [_]Instr {}) ++
+            (if (opt.qpu_extension) [_]Instr {
+                Instr.makeF37("Q.NEWCTX",   0b0101011, 1, 0x01, handleQpuNewContext, null),
+                Instr.makeF37("Q.FREECTX",  0b0101011, 1, 0x02, handleQpuFreeContext, null),
+                Instr.makeF37("Q.CLONECTX", 0b0101011, 1, 0x03, handleQpuCloneContext, null),
+                Instr.makeF37("Q.NEWREG",   0b0101011, 1, 0x10, handleQpuNewRegister, null),
+            });
 
         fn lessThan(_: void, a: Instr, b: Instr) bool {
             return a.opcode < b.opcode;
@@ -1006,6 +1016,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteScounteren(cpu: *Self, value: Tword) void { cpu.scounteren = value; }
         fn handleReadScounteren(cpu: *Self) Tword { return cpu.scounteren; }
 
+        fn handleWriteQpuCtx(cpu: *Self, value: Tword) void { cpu.qpu_ctx = value; }
+        fn handleReadQpuCtx(cpu: *Self) Tword { return cpu.qpu_ctx; }
+
         fn handleWriteMip(cpu: *Self, value: Tword) void {
             const writable_mask =
                 (@as(Tword, 1) << @intFromEnum(InterruptCause.supervisor_software)) |
@@ -1140,6 +1153,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             // TODO: replace with non-stubs
             CsrMapEntry.new("scounteren",0x106, handleWriteScounteren,     handleReadScounteren),
             CsrMapEntry.new("time",      0xc01, null,                      handleReadTime),
+
+            CsrMapEntry.new("qpuctx",    0x9da, handleWriteQpuCtx,         handleReadQpuCtx),
         };
 
         fn debugPrint(self: *const Self, comptime format: []const u8, args: anytype) DebugPrintError!void {
@@ -1715,6 +1730,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .paging_enabled = false,
                 .asid = 0,
                 .ppn = 0,
+                .qpu_ctx = 0,
+                .qpu = qpu.Qpu(Tword).init(allocator),
                 .instruction_cache = try TICache.init(allocator, 1048573),
             };
         }
@@ -1772,7 +1789,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
+        fn getCsrPrivilegeRequirement(id: Tcsrid) u2 {
+            return @truncate((id >> 8) & 0b11);
+        }
+
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
+            if (self.current_privilege_level.getEncoding() < Self.getCsrPrivilegeRequirement(id)) {
+                return null;
+            }
             if (findCsr(id)) |csr| {
                 const csr_read = csr.read_handler(self);
                 return csr_read;
@@ -1781,6 +1805,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn writeCsr(self: *Self, id: Tcsrid, value: Tword) ?TError {
+            if (self.current_privilege_level.getEncoding() < Self.getCsrPrivilegeRequirement(id)) {
+                return null;
+            }
             if (findCsr(id)) |csr| {
                 if (csr.write_handler) |handler| {
                     handler(self, value);
@@ -2805,6 +2832,41 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
         fn handleFenceI(self: *Self, _: u32) ?TError {
             self.instruction_cache.updateGeneration();
+            return null;
+        }
+
+        fn handleQpuNewContext(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const new_context_handle = self.qpu.allocateContext();
+            self.setRegister(
+                parsed.rd,
+                new_context_handle
+            );
+            return null;
+        }
+
+        fn handleQpuFreeContext(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const context_handle = self.getRegister(parsed.rs1);
+            self.qpu.freeContext(context_handle)
+                catch |err| {
+                    std.debug.print("Failed freeing QPU context: {}\n", .{err});
+                    return TError { .IllegalInstruction = instruction };
+                };
+            return null;
+        }
+
+        fn handleQpuCloneContext(self: *Self, instruction: u32) ?TError {
+            std.debug.print("W: trying to clone context!\n", .{});
+            _ = self;
+            return TError { .IllegalInstruction = instruction };
+        }
+
+        fn handleQpuNewRegister(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const handle = self.qpu.newRegister(self.qpu_ctx)
+                catch return TError { .IllegalInstruction = instruction };
+            self.setRegister(parsed.rd, handle);
             return null;
         }
 

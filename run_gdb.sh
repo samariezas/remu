@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -xe
-gdb ./image-build/linux/vmlinux.unstripped \
+gdb /home/joris/sources/kernel/linux/vmlinux.unstripped \
     --eval-command="set architecture riscv:rv64" \
     --eval-command="mem 0x0 0xffffffffffffffff ro" \
     --eval-command="set mem inaccessible-by-default off" \

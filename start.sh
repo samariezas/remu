@@ -58,22 +58,16 @@ if [[ ! -d "${OPENSBI_LOCATION}" ]]; then
     nix build ".#image-opensbi" -o "${OPENSBI_LOCATION}"
 fi
 
-if [[ ! -f "${DTB_FILE}" ]]; then
-    echo "Building DTB"
-    dtc ./simple.dts > "${DTB_FILE}"
-fi
-
 if [[ ! -d "${LINUX_LOCATION}" ]]; then
     echo "Building Linux"
     nix build ".#image-linux" -o "${LINUX_LOCATION}"
 fi
 
-if [[ ! -f "${INITRD_LOCATION}" ]]; then
-    echo "Building initrd"
-    nix build ".#image-initramfs" -o "${INITRD_LOCATION}"
-fi
-
 set -x
+nix build ".#image-initramfs" -o "${INITRD_LOCATION}"
+echo "Building DTB"
+INITRD_SIZE=$(printf "%07x" "$(stat -c %s $(readlink ${INITRD_LOCATION}))")
+sed "s/\${INITRD_SIZE}/${INITRD_SIZE}/" ./simple.dts.template | dtc > "${DTB_FILE}"
 zig build "-Doptimize=${ZIG_OPTIMIZATION_LEVEL}"
 
 COMMAND=()

@@ -19,7 +19,7 @@ pub const base64 = CpuOptions.makeBase(WordSize.w64);
 
 pub const priv64 = base64.withPrivileged();
 
-pub const full64 = base64.withM().withA().withPrivileged();
+pub const full64 = base64.withM().withA().withQpu().withPrivileged();
 
 pub fn findAll(allocator: mem.Allocator, start: []const u8, path: fs.Dir) ![][]const u8 {
     var walker = try path.walk(allocator);

@@ -11,6 +11,8 @@ pkgsCross.stdenv.mkDerivation {
 
   buildInputs = (with pkgs; [ ncurses ]);
 
+  patches = [ ./linux.patch ];
+
   nativeBuildInputs = (with pkgs; [
     pkg-config
     autoconf
