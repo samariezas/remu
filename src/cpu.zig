@@ -858,10 +858,13 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             fn handleWrite(cpu: *Self, value: Tword) void {
                 const new_mstatus: MStatusCSR = @bitCast(value);
+                cpu.spp = SppPrivilegeLevel.fromEncoding(new_mstatus.spp);
                 if (PrivilegeLevel.fromEncoding(new_mstatus.mpp)) |new_mpp| {
                     cpu.mpp = new_mpp;
                 }
+                cpu.sstatus_sie = new_mstatus.sie != 0;
                 cpu.mstatus_mie = new_mstatus.mie != 0;
+                cpu.spie = new_mstatus.spie != 0;
                 cpu.mpie = new_mstatus.mpie != 0;
             }
 
