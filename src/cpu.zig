@@ -668,7 +668,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 Instr.makeDirect("MRET", 0x30200073, handleMret, null).noJump(),
                 Instr.makeDirect("SRET", 0x10200073, handleSret, null).noJump(),
 
-                Instr.makeF37("SFENCE.VMA", 0b1110011, 0, 9, handleNop, null),
+                Instr.makeF37("SFENCE.VMA", 0b1110011, 0, 9, handleFenceI, null),
             } else [_]Instr {}) ++
             (if (opt.a_extension) [_]Instr {
                 Instr.makeF35("AMOSWAP.W", 0b0101111, 0b010, 0b00001,  handleAmoswapW,  null),
@@ -957,6 +957,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             mode: u4,
 
             fn handleWrite(cpu: *Self, value: Tword) void {
+                cpu.instruction_cache.updateGeneration();
                 const parsed: SatpCSR = @bitCast(value);
                 cpu.ppn = parsed.ppn;
                 cpu.asid = parsed.asid;
@@ -1428,7 +1429,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         };
 
         fn getNextInstructionHandlerWithCache(self: *Self) InstructionHandlerFetchResult {
-            switch (self.instruction_cache.cacheLookup(self.pc) catch @panic("OOM")) {
+            switch (self.instruction_cache.cacheLookup(self.pc, self.current_privilege_level) catch @panic("OOM")) {
                 .Hit => |hit| {
                     return InstructionHandlerFetchResult { .Success = hit, };
                 },
