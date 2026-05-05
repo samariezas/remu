@@ -1461,7 +1461,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         };
 
         fn getNextInstructionHandlerWithCache(self: *Self) InstructionHandlerFetchResult {
-            switch (self.instruction_cache.cacheLookup(self.pc) catch @panic("OOM")) {
+            switch (self.instruction_cache.cacheLookup(self.pc, self.current_privilege_level) catch @panic("OOM")) {
                 .Hit => |hit| {
                     return InstructionHandlerFetchResult { .Success = hit, };
                 },

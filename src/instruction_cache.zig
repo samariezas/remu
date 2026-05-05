@@ -1,4 +1,5 @@
 const std = @import("std");
+const PrivilegeLevel = @import("privilege.zig").PrivilegeLevel;
 const Allocator = std.mem.Allocator;
 const AutoHashMap = std.hash_map.AutoHashMap;
 
@@ -85,6 +86,7 @@ pub fn ArrICache(Tword: type, Thandler: type) type {
 
         const CacheEntry = struct {
             generation: u64,
+            privilege: PrivilegeLevel,
             address: Tword,
             data: CachedInstruction,
         };
@@ -128,15 +130,17 @@ pub fn ArrICache(Tword: type, Thandler: type) type {
             return &self.cache[index];
         }
 
-        pub fn cacheLookup(self: *Self, address: Tword) !CacheLookupResult {
+        pub fn cacheLookup(self: *Self, address: Tword, privilege: PrivilegeLevel) !CacheLookupResult {
             const hashmap_result = self.findCacheEntry(address);
             if (hashmap_result.generation == self.generation and
-                hashmap_result.address == address) {
+                hashmap_result.address == address and
+                hashmap_result.privilege == privilege) {
                 return CacheLookupResult {
                     .Hit = hashmap_result.data,
                 };
             }
             hashmap_result.generation = 0;
+            hashmap_result.privilege = privilege;
             hashmap_result.address = address;
             return CacheLookupResult {
                 .Miss = .{ 
