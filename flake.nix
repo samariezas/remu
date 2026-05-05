@@ -21,6 +21,8 @@
       };
       tests = import ./tests { inherit pkgs; };
       image = import ./image { inherit pkgs pkgsCross; };
+      libquantum = (pkgs.callPackage ./libquantum.nix {});
+      libquantum-wrap = (pkgs.callPackage ./libquantum-wrap { inherit libquantum; });
     in {
       packages.${system} = with tests; {
         inherit riscv-tests
@@ -40,6 +42,9 @@
 
             tests.spike-mod
             dtc
+
+            libquantum
+            libquantum-wrap
           ];
         };
         riscv = tests.riscv-devshell;

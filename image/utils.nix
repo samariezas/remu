@@ -6,12 +6,12 @@ pkgsCross.stdenv.mkDerivation {
 
   buildPhase = ''
     riscv64-unknown-linux-musl-gcc floating.c -o floating
-    riscv64-unknown-linux-musl-gcc qpu.c -o qpu
+    riscv64-unknown-linux-musl-gcc grover.c -o grover
   '';
 
   installPhase = ''
     mkdir -p $out/bin
-    cp floating qpu $out/bin
+    cp floating grover $out/bin
   '';
 
   fixupPhase = ''

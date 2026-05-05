@@ -704,7 +704,21 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 Instr.makeF37("Q.NEWCTX",   0b0101011, 1, 0x01, handleQpuNewContext, null),
                 Instr.makeF37("Q.FREECTX",  0b0101011, 1, 0x02, handleQpuFreeContext, null),
                 Instr.makeF37("Q.CLONECTX", 0b0101011, 1, 0x03, handleQpuCloneContext, null),
+
                 Instr.makeF37("Q.NEWREG",   0b0101011, 1, 0x10, handleQpuNewRegister, null),
+                Instr.makeF37("Q.CNOT",     0b0101011, 1, 0x11, handleQpuCnot, null),
+                Instr.makeF37("Q.TOFFOLI",  0b0101011, 1, 0x12, handleQpuToffoli, null),
+                Instr.makeF37("Q.SIGMAX",   0b0101011, 1, 0x13, handleQpuSigmaX, null),
+                Instr.makeF37("Q.SIGMAY",   0b0101011, 1, 0x14, handleQpuSigmaY, null),
+                Instr.makeF37("Q.SIGMAZ",   0b0101011, 1, 0x15, handleQpuSigmaZ, null),
+                Instr.makeF37("Q.HADAMARD", 0b0101011, 1, 0x16, handleQpuHadamard, null),
+                Instr.makeF37("Q.BMEASURE", 0b0101011, 1, 0x17, handleQpuBmeasure, null),
+                Instr.makeF37("Q.GETWIDTH", 0b0101011, 1, 0x18, handleQpuGetwidth, null),
+                Instr.makeF37("Q.PROB",     0b0101011, 1, 0x19, handleQpuProb, null),
+                Instr.makeF37("Q.GREGWIDTH",0b0101011, 1, 0x20, handleQpuGetRegWidth, null),
+                Instr.makeF37("Q.SREGWIDTH",0b0101011, 1, 0x21, handleQpuSetRegWidth, null),
+                Instr.makeF37("Q.GETREGNODE",0b0101011, 1, 0x22, handleQpuGetRegNode, null),
+                Instr.makeF37("Q.GETREGSIZE",0b0101011, 1, 0x23, handleQpuGetRegSize, null),
             });
 
         fn lessThan(_: void, a: Instr, b: Instr) bool {
@@ -1527,6 +1541,16 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             try self._bus.handleIo();
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
+                switch (err) {
+                    .IllegalInstruction => |*instr| {
+                        const instruction: u32 = @truncate(instr.*);
+                        const instruction_id: InstructionIdentifiers = @bitCast(instruction);
+                        std.debug.print("Illegal instruction, instr={x}, opcode=0x{x}, funct3=0x{x}, funct7=0x{x}\n", .{instr.*, instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
+                    },
+                    else => {
+                        std.debug.print("Trapping on {any}\n", .{err});
+                    },
+                }
                 self.trap(err);
             }
         }
@@ -1739,6 +1763,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         pub fn deinit(self: *Self) void {
             self._bus.deinit(self.allocator);
             self.instruction_cache.deinit();
+            self.qpu.deinit();
         }
 
         pub fn isHalted(self: *Self) bool {
@@ -2836,6 +2861,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleQpuNewContext(self: *Self, instruction: u32) ?TError {
+            if (self.current_privilege_level.getEncoding() <
+                PrivilegeLevel.Supervisor.getEncoding())
+                    return TError {
+                        .IllegalInstruction = instruction,
+                    };
             const parsed: RTypeInstruction = @bitCast(instruction);
             const new_context_handle = self.qpu.allocateContext();
             self.setRegister(
@@ -2846,6 +2876,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleQpuFreeContext(self: *Self, instruction: u32) ?TError {
+            if (self.current_privilege_level.getEncoding() <
+                PrivilegeLevel.Supervisor.getEncoding())
+                    return TError {
+                        .IllegalInstruction = instruction,
+                    };
             const parsed: RTypeInstruction = @bitCast(instruction);
             const context_handle = self.getRegister(parsed.rs1);
             self.qpu.freeContext(context_handle)
@@ -2857,16 +2892,166 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn handleQpuCloneContext(self: *Self, instruction: u32) ?TError {
-            std.debug.print("W: trying to clone context!\n", .{});
-            _ = self;
+            if (self.current_privilege_level.getEncoding() <
+                PrivilegeLevel.Supervisor.getEncoding())
+                    return TError {
+                        .IllegalInstruction = instruction,
+                    };
+            //std.debug.print("W: trying to clone context!\n", .{});
             return TError { .IllegalInstruction = instruction };
         }
 
         fn handleQpuNewRegister(self: *Self, instruction: u32) ?TError {
             const parsed: RTypeInstruction = @bitCast(instruction);
-            const handle = self.qpu.newRegister(self.qpu_ctx)
+            const initval = self.getRegister(parsed.rs1);
+            const width = self.getRegister(parsed.rs2);
+            const handle = self.qpu.newRegister(self.qpu_ctx, initval, width)
                 catch return TError { .IllegalInstruction = instruction };
             self.setRegister(parsed.rd, handle);
+            return null;
+        }
+
+        fn handleQpuCnot(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const control = self.getRegister(parsed.rs1);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying CNOT, {} {} {}\n", .{control, target, register});
+            self.qpu.cnot(self.qpu_ctx, control, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuToffoli(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const control1 = self.getRegister(parsed.rs1);
+            const control2 = self.getRegister(10);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying TOFFOLI, {} {} {} {}\n", .{control1, control2, target, register});
+            self.qpu.toffoli(self.qpu_ctx, control1, control2, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuSigmaX(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying sigmax, {} {}\n", .{target, register});
+            self.qpu.sigmaX(self.qpu_ctx, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuSigmaY(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying sigmay, {} {}\n", .{target, register});
+            self.qpu.sigmaY(self.qpu_ctx, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuSigmaZ(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying sigmaz, {} {}\n", .{target, register});
+            self.qpu.sigmaZ(self.qpu_ctx, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuHadamard(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const target = self.getRegister(parsed.rs2);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying hadamard, {} {}\n", .{target, register});
+            self.qpu.hadamard(self.qpu_ctx, target, register)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuBmeasure(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const pos = self.getRegister(parsed.rs1);
+            const register = self.getRegister(parsed.rs2);
+            //std.debug.print("Applying bmeasure, {} {}", .{pos, register});
+            const result = self.qpu.bmeasure(self.qpu_ctx, pos, register)
+                catch return TError { .IllegalInstruction = instruction };
+            //std.debug.print(" result={}\n", .{result});
+            self.setRegister(parsed.rd, result);
+            return null;
+        }
+
+        fn handleQpuGetwidth(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const n = self.getRegister(parsed.rs1);
+            const result = qpu.Qpu(Tword).getwidth(n);
+            //std.debug.print("Applying getwidth, {} {}\n", .{n, result});
+            self.setRegister(parsed.rd, result);
+            return null;
+        }
+
+        fn handleQpuProb(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const real: u32 = @truncate(self.getRegister(parsed.rs1));
+            const imaginary: u32 = @truncate(self.getRegister(parsed.rs2));
+            const real_f: f32 = @bitCast(real);
+            const imaginary_f: f32 = @bitCast(imaginary);
+            const probability: f32 = qpu.Qpu(Tword).getProb(real_f, imaginary_f);
+            // std.debug.print("Applying prob, {} {} result={}\n", .{real_f, imaginary_f, probability});
+            const probability_int: u32 = @bitCast(probability);
+            self.setRegister(parsed.rd, @intCast(probability_int));
+            return null;
+        }
+
+        fn handleQpuGetRegWidth(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const register = self.getRegister(parsed.rs1);
+            //std.debug.print("Applying getregwidth, reg={}, ", .{register});
+            const result = self.qpu.getRegWidth(self.qpu_ctx, register)
+                catch return TError { .IllegalInstruction = instruction };
+            //std.debug.print("retval={}\n", .{result});
+            self.setRegister(parsed.rd, result);
+            return null;
+        }
+
+        fn handleQpuSetRegWidth(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const value = self.getRegister(parsed.rs1);
+            const register = self.getRegister(parsed.rd);
+            //std.debug.print("Applying setregwidth, reg={} val={}\n", .{register, value});
+            self.qpu.setRegWidth(self.qpu_ctx, register, value)
+                catch return TError { .IllegalInstruction = instruction };
+            return null;
+        }
+
+        fn handleQpuGetRegNode(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const register = self.getRegister(11);
+            const idx = self.getRegister(12);
+            // std.debug.print("Applying getregnode, reg={} idx={}\n", .{register, idx});
+            const result = self.qpu.getRegNode(self.qpu_ctx, register, idx)
+                catch return TError { .IllegalInstruction = instruction };
+            // std.debug.print("result = {}\n", .{result});
+            const amplitude_r_int: u32 = @bitCast(result.amplitude_r);
+            const amplitude_i_int: u32 = @bitCast(result.amplitude_i);
+            self.setRegister(parsed.rd, result.state);
+            self.setRegister(parsed.rs1, @intCast(amplitude_r_int));
+            self.setRegister(parsed.rs2, @intCast(amplitude_i_int));
+            return null;
+        }
+
+        fn handleQpuGetRegSize(self: *Self, instruction: u32) ?TError {
+            const parsed: RTypeInstruction = @bitCast(instruction);
+            const register = self.getRegister(parsed.rs1);
+            const result = self.qpu.getRegSize(self.qpu_ctx, register)
+                catch return TError { .IllegalInstruction = instruction };
+            //std.debug.print("Applying getregsize, reg={}, result={}\n", .{register, result});
+            self.setRegister(parsed.rd, result);
             return null;
         }
 

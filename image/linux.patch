@@ -177,10 +177,10 @@ index 31a392993..e1b7ce4c6 100644
  
 diff --git a/arch/riscv/kernel/qpu.c b/arch/riscv/kernel/qpu.c
 new file mode 100644
-index 000000000..93cc1573c
+index 000000000..9bd97ee7b
 --- /dev/null
 +++ b/arch/riscv/kernel/qpu.c
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,340 @@
 +#include <linux/atomic.h>
 +#include <linux/errno.h>
 +#include <linux/percpu.h>
@@ -279,6 +279,11 @@ index 000000000..93cc1573c
 +void riscv_qpu_arch_disable(void)
 +{
 +	csr_write(CSR_QPU_CTX, 0);
++}
++
++static bool riscv_qpu_arch_enabled(void)
++{
++	return csr_read(CSR_QPU_CTX) != 0;
 +}
 +
 +/* -------------------------------------------------------------------------- */
@@ -409,6 +414,18 @@ index 000000000..93cc1573c
 +	return true;
 +}
 +
++static bool qpu_try_reinitialize(void)
++{
++	struct __riscv_qpu_ext_state *state = &current->thread.qpu;
++	if (state->status != RISCV_QPU_OFF &&
++	    state->context_id != 0 &&
++	    !riscv_qpu_arch_enabled()) {
++		riscv_qpu_arch_enable_context(state);
++		return true;
++	}
++	return false;
++}
++
 +bool riscv_qpu_first_use_handler(struct pt_regs *regs)
 +{
 +	u32 insn;
@@ -422,6 +439,9 @@ index 000000000..93cc1573c
 +
 +	if (!riscv_qpu_insn_is_qpu(insn))
 +		return false;
++
++	if (qpu_try_reinitialize())
++		return true;
 +
 +	ret = qpu_restore_current();
 +	if (ret) {

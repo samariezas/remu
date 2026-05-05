@@ -8,6 +8,8 @@ fn buildC(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .root_source_file = b.addWriteFiles().add( "libelf_binding.h",
             \\#include <string.h>
             \\#include <libelf.h>
+            \\#include <quantum.h>
+            \\#include <quantum-wrap.h>
         ),
     });
     const nix_cflags: []const u8 = std.process.getEnvVarOwned(b.allocator, "NIX_CFLAGS_COMPILE") catch "";
@@ -35,6 +37,9 @@ fn buildRemuStep(b: *std.Build, root_module: *std.Build.Module, use_llvm: bool) 
         .use_llvm = use_llvm,
     });
     exe.linkSystemLibrary("elf");
+    exe.linkSystemLibrary("quantum");
+    exe.linkSystemLibrary("quantum_wrap");
+    exe.linkSystemLibrary("m");
     exe.linkSystemLibrary("c");
     return exe;
 }
