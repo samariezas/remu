@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 #define RISCV_QPU_INSTR(funct7) "0b0101011, 1, " funct7
 
@@ -289,12 +290,13 @@ int main(int argc, char **argv)
   if(argc > 2)
     width = atoi(argv[2]);
 
+  struct timespec start, end;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+
   if(width < qpu_getwidth(N+1))
     width = qpu_getwidth(N+1);
 
-  printf("Creating qureg with width %i\n", width);
   reg = qpu_new_qureg(0, width);
-  printf("Qureg width: %li\n", qpu_getregwidth(reg));
 
   uint64_t temp_width = qpu_getregwidth(reg);
   qpu_sigma_x(temp_width, reg);
@@ -309,7 +311,7 @@ int main(int argc, char **argv)
 
   for(i=1; i<=iter_count; i++)
     {
-      printf("Iteration #%i\n", i);
+      // printf("Iteration #%i\n", i);
       grover(N, reg);
     }
 
@@ -330,6 +332,9 @@ int main(int argc, char **argv)
     }
 
   // quantum_delete_qureg(&reg);
+  clock_gettime(CLOCK_MONOTONIC, &end);
+  unsigned long long ns_taken = (end.tv_sec - start.tv_sec) * 1000000000 + (end.tv_nsec - start.tv_nsec);
+  printf("Time taken: %llu\n", ns_taken);
 
   return 0;
 }

@@ -5,8 +5,8 @@ pkgsCross.stdenv.mkDerivation {
   src = ./utils;
 
   buildPhase = ''
-    riscv64-unknown-linux-musl-gcc floating.c -o floating
-    riscv64-unknown-linux-musl-gcc grover.c -o grover
+    riscv64-unknown-linux-musl-gcc -O2 -Wall floating.c -o floating
+    riscv64-unknown-linux-musl-gcc -O2 -Wall grover.c -o grover
   '';
 
   installPhase = ''
