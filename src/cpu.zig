@@ -1545,16 +1545,6 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             try self._bus.handleIo();
             const execution_error = try self.executeInstruction();
             if (execution_error) |err| {
-                switch (err) {
-                    .IllegalInstruction => |*instr| {
-                        const instruction: u32 = @truncate(instr.*);
-                        const instruction_id: InstructionIdentifiers = @bitCast(instruction);
-                        std.debug.print("Illegal instruction, instr={x}, opcode=0x{x}, funct3=0x{x}, funct7=0x{x}\n", .{instr.*, instruction_id.opcode, instruction_id.funct3, instruction_id.funct7});
-                    },
-                    else => {
-                        std.debug.print("Trapping on {any}\n", .{err});
-                    },
-                }
                 self.trap(err);
             }
         }

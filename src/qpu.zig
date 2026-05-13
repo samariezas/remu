@@ -195,12 +195,8 @@ pub fn Qpu(Tword: type) type {
         }
 
         pub fn newRegister(self: *Self, ctx_tw: Tword, initval: u64, width: u64) !Tword {
-            std.debug.print("Trying to get context, tw={}\n", .{ctx_tw});
-            defer std.debug.print("New register tw={} done\n", .{ctx_tw});
             const ctx = try self.getContext(ctx_tw);
-            std.debug.print("Creating register on ctx={}, ", .{ctx_tw});
             const new_register_handle = ctx.createRegister(initval, width);
-            std.debug.print(", handle={}\n", .{new_register_handle});
             return idxToTword(new_register_handle);
         }
 
