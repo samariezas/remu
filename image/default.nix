@@ -33,7 +33,7 @@ rec {
   '';
   initramfs = import ./initramfs.nix {
     inherit pkgs;
-    derivations = [ musl busybox lua utils benchmark tcc samples vim ];
+    derivations = [ musl busybox lua utils benchmark tcc samples ];
   };
   opensbi = import ./opensbi.nix { inherit pkgsCross pkgs; };
 }
