@@ -6,6 +6,16 @@ rec {
   utils = import ./utils.nix { inherit pkgsCross pkgs; };
   tcc = import ./tcc.nix { inherit pkgsCross pkgs; };
 
+  samples = pkgs.stdenv.mkDerivation {
+    name = "samples";
+    src = ./samples;
+    buildPhase = ''
+      mkdir -p $out/samples
+      cp -a * $out/samples
+    '';
+    dontFixup = true;
+  };
+
   linux = import ./linux.nix { inherit pkgsCross pkgs; };
   benchmark = pkgs.writeScriptBin "benchmark" ''
     mkdir /results
@@ -21,7 +31,7 @@ rec {
   '';
   initramfs = import ./initramfs.nix {
     inherit pkgs;
-    derivations = [ musl busybox lua utils benchmark tcc ];
+    derivations = [ musl busybox lua utils benchmark tcc samples ];
   };
   opensbi = import ./opensbi.nix { inherit pkgsCross pkgs; };
 }
