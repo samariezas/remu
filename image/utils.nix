@@ -7,11 +7,14 @@ pkgsCross.stdenv.mkDerivation {
   buildPhase = ''
     riscv64-unknown-linux-musl-gcc -O2 -Wall floating.c -o floating
     riscv64-unknown-linux-musl-gcc -O2 -Wall grover.c -o grover
+    riscv64-unknown-linux-musl-gcc -DLIBQPU -x c -c -Wall qpu.h -o libqpu.o
+    riscv64-unknown-linux-musl-ar rcs libqpu.a libqpu.o 
   '';
 
   installPhase = ''
-    mkdir -p $out/bin $out/include
+    mkdir -p $out/bin $out/include $out/lib
     cp qpu.h $out/include
+    cp libqpu.a $out/lib
     cp floating grover $out/bin
   '';
 
