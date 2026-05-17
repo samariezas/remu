@@ -1031,6 +1031,8 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         fn handleWriteMcounteren(cpu: *Self, value: Tword) void { cpu.mcounteren = value; }
         fn handleReadMcounteren(cpu: *Self) Tword { return cpu.mcounteren; }
 
+        fn handleReadMvendorid(_: *Self) Tword { return 0x39e; }
+
         fn handleWriteScounteren(cpu: *Self, value: Tword) void { cpu.scounteren = value; }
         fn handleReadScounteren(cpu: *Self) Tword { return cpu.scounteren; }
 
@@ -1151,7 +1153,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
 
             CsrMapEntry.new("misa",    0x301, handleWriteStub,              handleReadMisa),
             CsrMapEntry.new("mcounteren",0x306,handleWriteMcounteren,        handleReadMcounteren),
-            CsrMapEntry.new("mvendorid",0xf11,null,                         handleReadZero),
+            CsrMapEntry.new("mvendorid",0xf11,null,                         handleReadMvendorid),
 
             // TODO: replace with non-stubs
             CsrMapEntry.new("mhartid", 0xf14, null,                        handleReadZero),

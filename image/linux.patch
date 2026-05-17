@@ -1,3 +1,27 @@
+diff --git a/arch/riscv/Kconfig.vendor b/arch/riscv/Kconfig.vendor
+index 3c1f92e40..0f7960ca9 100644
+--- a/arch/riscv/Kconfig.vendor
++++ b/arch/riscv/Kconfig.vendor
+@@ -54,6 +54,19 @@ config RISCV_ISA_VENDOR_EXT_THEAD
+ 
+ 	  If you don't know what to do here, say Y.
+ 
++menu "QPU"
++config RISCV_ISA_VENDOR_EXT_QPU
++	bool "QPU vendor extension support"
++	select RISCV_ISA_VENDOR_EXT
++	default y
++	help
++	  Say N here if you want to disable all QPU vendor extension
++	  support. This will cause any QPU vendor extensions that are
++	  requested by hardware probing to be ignored.
++
++	  If you don't know what to do here, say Y.
++endmenu
++
+ config RISCV_ISA_XTHEADVECTOR
+ 	bool "xtheadvector extension support"
+ 	depends on RISCV_ISA_VENDOR_EXT_THEAD
 diff --git a/arch/riscv/include/asm/csr.h b/arch/riscv/include/asm/csr.h
 index 4a37a9839..2db689cd5 100644
 --- a/arch/riscv/include/asm/csr.h
@@ -33,10 +57,10 @@ index da5426122..35a538ec7 100644
  	/* Flush the icache on migration */
 diff --git a/arch/riscv/include/asm/qpu.h b/arch/riscv/include/asm/qpu.h
 new file mode 100644
-index 000000000..858f10eb2
+index 000000000..410a0dfab
 --- /dev/null
 +++ b/arch/riscv/include/asm/qpu.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,57 @@
 +#ifndef _ASM_RISCV_QPU_H
 +#define _ASM_RISCV_QPU_H
 +
@@ -89,11 +113,13 @@ index 000000000..858f10eb2
 +int riscv_qpu_arch_enable_context(struct __riscv_qpu_ext_state *state);
 +void riscv_qpu_arch_disable(void);
 +
++bool riscv_qpu_available(void);
++
 +#endif /* __ASSEMBLY__ */
 +
 +#endif /* _ASM_RISCV_QPU_H */
 diff --git a/arch/riscv/include/asm/switch_to.h b/arch/riscv/include/asm/switch_to.h
-index 0e71eb82f..03bd911b4 100644
+index 0e71eb82f..df578f34f 100644
 --- a/arch/riscv/include/asm/switch_to.h
 +++ b/arch/riscv/include/asm/switch_to.h
 @@ -14,6 +14,7 @@
@@ -104,14 +130,45 @@ index 0e71eb82f..03bd911b4 100644
  
  #ifdef CONFIG_FPU
  extern void __fstate_save(struct task_struct *save_to);
-@@ -119,6 +120,7 @@ do {							\
+@@ -119,6 +120,8 @@ do {							\
  		__switch_to_fpu(__prev, __next);	\
  	if (has_vector() || has_xtheadvector())		\
  		__switch_to_vector(__prev, __next);	\
-+	__switch_to_qpu(__prev, __next);		\
++	if (riscv_qpu_available())			\
++		__switch_to_qpu(__prev, __next);	\
  	if (switch_to_should_flush_icache(__next))	\
  		local_flush_icache_all();		\
  	__switch_to_envcfg(__next);			\
+diff --git a/arch/riscv/include/asm/vendor_extensions/qpu.h b/arch/riscv/include/asm/vendor_extensions/qpu.h
+new file mode 100644
+index 000000000..d68937c09
+--- /dev/null
++++ b/arch/riscv/include/asm/vendor_extensions/qpu.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_RISCV_VENDOR_EXTENSIONS_QPU_H
++#define _ASM_RISCV_VENDOR_EXTENSIONS_QPU_H
++
++#include <asm/vendor_extensions.h>
++
++#include <linux/types.h>
++
++#define RISCV_ISA_VENDOR_EXT_XQPU		0
++
++extern struct riscv_isa_vendor_ext_data_list riscv_isa_vendor_ext_list_qpu;
++
++#endif
+diff --git a/arch/riscv/include/asm/vendorid_list.h b/arch/riscv/include/asm/vendorid_list.h
+index 7f5030ee1..2e666479e 100644
+--- a/arch/riscv/include/asm/vendorid_list.h
++++ b/arch/riscv/include/asm/vendorid_list.h
+@@ -10,5 +10,6 @@
+ #define MIPS_VENDOR_ID		0x127
+ #define SIFIVE_VENDOR_ID	0x489
+ #define THEAD_VENDOR_ID		0x5b7
++#define QPU_VENDOR_ID		0x39e
+ 
+ #endif
 diff --git a/arch/riscv/kernel/Makefile b/arch/riscv/kernel/Makefile
 index f60fce69b..27207fef7 100644
 --- a/arch/riscv/kernel/Makefile
@@ -177,10 +234,10 @@ index 31a392993..e1b7ce4c6 100644
  
 diff --git a/arch/riscv/kernel/qpu.c b/arch/riscv/kernel/qpu.c
 new file mode 100644
-index 000000000..9bd97ee7b
+index 000000000..38180503a
 --- /dev/null
 +++ b/arch/riscv/kernel/qpu.c
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,350 @@
 +#include <linux/atomic.h>
 +#include <linux/errno.h>
 +#include <linux/percpu.h>
@@ -192,6 +249,8 @@ index 000000000..9bd97ee7b
 +#include <asm/ptrace.h>
 +#include <asm/qpu.h>
 +#include <asm/csr.h>
++#include <asm/vendor_extensions.h>
++#include <asm/vendor_extensions/qpu.h>
 +
 +#define RISCV_QPU_INSTR(funct7) "0b0101011, 1, " funct7
 +
@@ -431,6 +490,9 @@ index 000000000..9bd97ee7b
 +	u32 insn;
 +	int ret;
 +
++	if (!riscv_qpu_available())
++		return false;
++
 +	if (!user_mode(regs))
 +		return false;
 +
@@ -521,6 +583,11 @@ index 000000000..9bd97ee7b
 +{
 +	qpu_free_state(&tsk->thread.qpu);
 +}
++
++bool riscv_qpu_available(void)
++{
++	return riscv_isa_vendor_extension_available(QPU_VENDOR_ID, XQPU);
++}
 diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
 index 80230de16..a50e963dc 100644
 --- a/arch/riscv/kernel/traps.c
@@ -543,3 +610,71 @@ index 80230de16..a50e963dc 100644
  		if (!handled)
  			do_trap_error(regs, SIGILL, ILL_ILLOPC, regs->epc,
  				      "Oops - illegal instruction");
+diff --git a/arch/riscv/kernel/vendor_extensions.c b/arch/riscv/kernel/vendor_extensions.c
+index bb4a75923..df6e8d724 100644
+--- a/arch/riscv/kernel/vendor_extensions.c
++++ b/arch/riscv/kernel/vendor_extensions.c
+@@ -9,6 +9,7 @@
+ #include <asm/vendor_extensions/mips.h>
+ #include <asm/vendor_extensions/sifive.h>
+ #include <asm/vendor_extensions/thead.h>
++#include <asm/vendor_extensions/qpu.h>
+ 
+ #include <linux/array_size.h>
+ #include <linux/types.h>
+@@ -26,6 +27,12 @@ struct riscv_isa_vendor_ext_data_list *riscv_isa_vendor_ext_list[] = {
+ #ifdef CONFIG_RISCV_ISA_VENDOR_EXT_THEAD
+ 	&riscv_isa_vendor_ext_list_thead,
+ #endif
++#ifdef CONFIG_RISCV_ISA_VENDOR_EXT_THEAD
++	&riscv_isa_vendor_ext_list_thead,
++#endif
++#ifdef CONFIG_RISCV_ISA_VENDOR_EXT_QPU
++	&riscv_isa_vendor_ext_list_qpu,
++#endif
+ };
+ 
+ const size_t riscv_isa_vendor_ext_list_size = ARRAY_SIZE(riscv_isa_vendor_ext_list);
+@@ -71,6 +78,12 @@ bool __riscv_isa_vendor_extension_available(int cpu, unsigned long vendor, unsig
+ 		cpu_bmap = riscv_isa_vendor_ext_list_thead.per_hart_isa_bitmap;
+ 		break;
+ 	#endif
++	#ifdef CONFIG_RISCV_ISA_VENDOR_EXT_QPU
++	case QPU_VENDOR_ID:
++		bmap = &riscv_isa_vendor_ext_list_qpu.all_harts_isa_bitmap;
++		cpu_bmap = riscv_isa_vendor_ext_list_qpu.per_hart_isa_bitmap;
++		break;
++	#endif
+ 	default:
+ 		return false;
+ 	}
+diff --git a/arch/riscv/kernel/vendor_extensions/Makefile b/arch/riscv/kernel/vendor_extensions/Makefile
+index bf116c82b..4a868213f 100644
+--- a/arch/riscv/kernel/vendor_extensions/Makefile
++++ b/arch/riscv/kernel/vendor_extensions/Makefile
+@@ -7,3 +7,4 @@ obj-$(CONFIG_RISCV_ISA_VENDOR_EXT_SIFIVE)	+= sifive.o
+ obj-$(CONFIG_RISCV_ISA_VENDOR_EXT_SIFIVE)	+= sifive_hwprobe.o
+ obj-$(CONFIG_RISCV_ISA_VENDOR_EXT_THEAD)	+= thead.o
+ obj-$(CONFIG_RISCV_ISA_VENDOR_EXT_THEAD)	+= thead_hwprobe.o
++obj-$(CONFIG_RISCV_ISA_VENDOR_EXT_QPU)		+= qpu.o
+diff --git a/arch/riscv/kernel/vendor_extensions/qpu.c b/arch/riscv/kernel/vendor_extensions/qpu.c
+new file mode 100644
+index 000000000..49cf89348
+--- /dev/null
++++ b/arch/riscv/kernel/vendor_extensions/qpu.c
+@@ -0,0 +1,15 @@
++#include <asm/cpufeature.h>
++#include <asm/vendor_extensions.h>
++#include <asm/vendor_extensions/qpu.h>
++
++#include <linux/array_size.h>
++#include <linux/types.h>
++
++static const struct riscv_isa_ext_data riscv_isa_vendor_ext_qpu[] = {
++	__RISCV_ISA_EXT_DATA(xqpu, RISCV_ISA_VENDOR_EXT_XQPU),
++};
++
++struct riscv_isa_vendor_ext_data_list riscv_isa_vendor_ext_list_qpu = {
++	.ext_data_count = ARRAY_SIZE(riscv_isa_vendor_ext_qpu),
++	.ext_data = riscv_isa_vendor_ext_qpu,
++};
