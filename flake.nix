@@ -30,6 +30,8 @@
         image-initramfs = initramfs;
         image-opensbi = opensbi;
         image-tcc = tcc;
+        image-ncurses = ncurses;
+        image-vim = vim;
       });
 
       devShells.${system} = {
