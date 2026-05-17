@@ -85,6 +85,7 @@ COMMAND+=(
     "${OPENSBI_LOCATION}/fw_dynamic.bin"
     "${DTB_FILE}"
     "${LINUX_LOCATION}/Image"
+    # "/home/joris/sources/kernel/linux/arch/riscv/boot/Image"
     "${INITRD_LOCATION}"
 )
 

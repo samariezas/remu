@@ -303,7 +303,7 @@ fn loadImage(
     image: []const u8,
     current_location: opt.getTword(),
 ) !opt.getTword() {
-    const MAX_FILESIZE = 32*1024*1024;
+    const MAX_FILESIZE = 64*1024*1024;
     const Tword = opt.getTword();
     const image_data = try std.fs.cwd().readFileAlloc(
         allocator, image, MAX_FILESIZE
