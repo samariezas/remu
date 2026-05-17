@@ -10,7 +10,8 @@ pkgsCross.stdenv.mkDerivation {
   '';
 
   installPhase = ''
-    mkdir -p $out/bin
+    mkdir -p $out/bin $out/include
+    cp qpu.h $out/include
     cp floating grover $out/bin
   '';
 

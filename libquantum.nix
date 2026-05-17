@@ -5,6 +5,6 @@ stdenv.mkDerivation rec {
 
   src = fetchurl {
     url = "http://www.libquantum.de/files/libquantum-${version}.tar.gz";
-    sha256 = "07xfcg8ryjjhy41pxpzhnbnsd4c68l969z5331323gjwz5002glk";
+    sha256 = "sha256-sPGl7JdoRXrJg1vVLDAX0nmsmcwN/+bOKt+Kx2KZeyw=";
   };
 }

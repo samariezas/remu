@@ -31,6 +31,7 @@
         image-linux = linux;
         image-initramfs = initramfs;
         image-opensbi = opensbi;
+        image-tcc = tcc;
       });
 
       devShells.${system} = {
@@ -48,6 +49,7 @@
           ];
         };
         riscv = tests.riscv-devshell;
+        riscv-musl = pkgsCross.mkShell { };
       };
 
       apps.${system}.tests = {

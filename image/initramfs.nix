@@ -15,6 +15,7 @@ pkgs.stdenvNoCC.mkDerivation {
     # dynamic linker and init script
   ''
     ln -s /lib/libc.so lib/ld-musl-riscv64-sf.so.1
+    ln -s /lib/libc.so lib/ld-musl-riscv64.so.1
     cp -a ${./init} init
   '';
 
