@@ -29,7 +29,7 @@ fn buildC(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 
 fn buildRemuStep(b: *std.Build, root_module: *std.Build.Module, use_llvm: bool) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
-        .name = "bemu",
+        .name = "remu",
         .root_module = root_module,
         .link_libc = true,
         .use_llvm = use_llvm,

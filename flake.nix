@@ -53,7 +53,7 @@
         type = "app";
         program = "${pkgs.writeShellScript "run_riscv_tests" ''
           zig build
-          ./zig-out/bin/bemu full ${tests.riscv-tests}/share/riscv-tests/
+          ./zig-out/bin/remu full ${tests.riscv-tests}/share/riscv-tests/
         ''}";
       };
     };
