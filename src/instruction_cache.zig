@@ -5,26 +5,76 @@ const AutoHashMap = std.hash_map.AutoHashMap;
 
 const INSTRUCTION_ALIGN: comptime_int = 4;
 
+
+pub fn TCachedInstruction(Thandler: type) type {
+    return struct {
+        instruction: u32,
+        handler: *const Thandler,
+    };
+}
+
+pub fn TCacheEntry(Tword: type, Thandler: type) type {
+    return struct {
+        generation: u64,
+        privilege: PrivilegeLevel,
+        address: Tword,
+        data: TCachedInstruction(Thandler),
+    };
+}
+
+pub fn TMissedCacheHandle(Tword: type, Thandler: type) type {
+    return struct { generation: u64, dest: *TCacheEntry(Tword, Thandler) };
+}
+
+pub fn TCacheLookupResult(Tword: type, Thandler: type) type {
+    return union(enum) {
+        Hit: TCachedInstruction(Thandler),
+        Miss: TMissedCacheHandle(Tword, Thandler),
+    };
+}
+
+pub fn DummyICache(Tword: type, Thandler: type) type {
+    return struct {
+        const Self = @This();
+
+        const CacheLookupResult = union(enum) {
+            Hit: CachedInstruction,
+            Miss: void,
+        };
+        pub const CachedInstruction = TCachedInstruction(Thandler);
+        const MissedCacheHandle = void;
+
+        pub fn init(_: Allocator, _: usize) !Self {
+            return .{};
+        }
+
+        pub fn deinit(_: *Self) void { }
+
+        pub fn updateGeneration(_: *Self) void { }
+
+        pub fn cacheLookup(_: *Self, _: Tword, _: PrivilegeLevel) !CacheLookupResult {
+            return CacheLookupResult {
+                .Miss = undefined,
+            };
+        }
+
+        pub fn updateCache(_: MissedCacheHandle, instruction: u32, handler: *const Thandler) CachedInstruction {
+            return .{
+                .instruction = instruction,
+                .handler = handler,
+            };
+        }
+    };
+}
+
 pub fn ICache(Tword: type, Thandler: type) type {
     return struct {
         const Self = @This();
 
-        pub const CachedInstruction = struct {
-            instruction: u32,
-            handler: *const Thandler,
-        };
-
-        const CacheEntry = struct {
-            generation: u64,
-            data: CachedInstruction,
-        };
-
-        const MissedCacheHandle = struct { generation: u64, dest: *CacheEntry };
-
-        const CacheLookupResult = union(enum) {
-            Hit: CachedInstruction,
-            Miss: MissedCacheHandle,
-        };
+        const CacheEntry = TCacheEntry(Tword, Thandler);
+        const CacheLookupResult = TCacheLookupResult(Tword, Thandler);
+        pub const CachedInstruction = TCachedInstruction(Thandler);
+        const MissedCacheHandle = TMissedCacheHandle(Tword, Thandler);
 
         const TMap = AutoHashMap(Tword, CacheEntry);
 
@@ -46,11 +96,14 @@ pub fn ICache(Tword: type, Thandler: type) type {
             self.generation += 1;
         }
 
-        pub fn cacheLookup(self: *Self, address: Tword) !CacheLookupResult {
+        pub fn cacheLookup(self: *Self, address: Tword, privilege: PrivilegeLevel) !CacheLookupResult {
             std.debug.assert((address % INSTRUCTION_ALIGN) == 0);
             const index: Tword = address / INSTRUCTION_ALIGN;
             const hashmap_result = try self.cache.getOrPut(index);
-            if (hashmap_result.found_existing and hashmap_result.value_ptr.generation == self.generation) {
+            if (hashmap_result.found_existing and
+                hashmap_result.value_ptr.generation == self.generation and
+                hashmap_result.value_ptr.address == address and
+                hashmap_result.value_ptr.privilege == privilege) {
                 return CacheLookupResult {
                     .Hit = hashmap_result.value_ptr.data,
                 };
@@ -79,24 +132,10 @@ pub fn ArrICache(Tword: type, Thandler: type) type {
     return struct {
         const Self = @This();
 
-        pub const CachedInstruction = struct {
-            instruction: u32,
-            handler: *const Thandler,
-        };
-
-        const CacheEntry = struct {
-            generation: u64,
-            privilege: PrivilegeLevel,
-            address: Tword,
-            data: CachedInstruction,
-        };
-
-        const MissedCacheHandle = struct { generation: u64, dest: *CacheEntry };
-
-        const CacheLookupResult = union(enum) {
-            Hit: CachedInstruction,
-            Miss: MissedCacheHandle,
-        };
+        const CacheEntry = TCacheEntry(Tword, Thandler);
+        const CacheLookupResult = TCacheLookupResult(Tword, Thandler);
+        pub const CachedInstruction = TCachedInstruction(Thandler);
+        const MissedCacheHandle = TMissedCacheHandle(Tword, Thandler);
 
         const TMap = std.hash_map.AutoHashMap(Tword, CacheEntry);
 
