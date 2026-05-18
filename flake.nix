@@ -34,7 +34,29 @@
         libquantum
         libquantum-wrap
       ];
-    in {
+
+      run-script = pkgs.writeScript "run.sh" ''
+        #!/usr/bin/env bash
+        set -eu
+        cd "$(dirname "$0")"
+        
+        if [ -x "../remu.AppImage" ]; then
+            EMULATOR="../remu.AppImage"
+        elif [ -x "./remu.AppImage" ]; then
+            EMULATOR="./remu.AppImage"
+        else
+            echo "Klaida: nerastas remu.AppImage failas." >&2
+            exit 1
+        fi
+        
+        set -x
+        "$EMULATOR" binary \
+            ./opensbi.bin \
+            ./machine.dtb \
+            ./linux \
+            ./initrd
+      '';
+    in rec {
       packages.${system} = with tests; {
         inherit riscv-tests
                 riscv-tests-orig;
@@ -47,6 +69,30 @@
         image-vim = vim;
 
         remu = pkgs.stdenv.mkDerivation {
+          name = "remu";
+          version = "0.0.1";
+          src = ./.;
+
+          buildInputs = zig-build-inputs;
+          
+          buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache"
+              export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
+              zig build \
+                  --color off \
+                  --summary all \
+                  -Doptimize=ReleaseSafe
+          '';
+
+          installPhase = ''
+              mkdir -p $out/bin
+              cp zig-out/bin/remu $out/bin
+          '';
+
+          meta.mainProgram = "remu";
+        };
+
+        remu-sandybridge = pkgs.stdenv.mkDerivation {
           name = "remu";
           version = "0.0.1";
           src = ./.;
@@ -83,6 +129,8 @@
             cp ${image.initramfs} ./remu-package/initrd
             cp ${image.linux}/Image ./remu-package/linux
             cp ${image.opensbi}/fw_dynamic.bin ./remu-package/opensbi.bin
+            cp ${run-script} ./remu-package/run.sh
+            chmod +x ./remu-package/run.sh
             INITRD_SIZE=$(printf "%07x" "$(stat -c %s ./remu-package/initrd)")
             sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc > ./remu-package/machine.dtb
             tar cvzf $out ./remu-package
@@ -98,12 +146,27 @@
         riscv-musl = pkgsCross.mkShell { };
       };
 
-      apps.${system}.tests = {
-        type = "app";
-        program = "${pkgs.writeShellScript "run_riscv_tests" ''
-          zig build
-          ./zig-out/bin/remu full ${tests.riscv-tests}/share/riscv-tests/
-        ''}";
+      apps.${system} = {
+        tests = {
+          type = "app";
+          program = "${pkgs.writeShellScript "run_riscv_tests" ''
+            zig build
+            ./zig-out/bin/remu full ${tests.riscv-tests}/share/riscv-tests/
+          ''}";
+        };
+      
+        default = {
+          type = "app";
+          program = "${pkgs.writeShellScript "run_riscv_tests" ''
+            INITRD_SIZE=$(printf "%07x" "$(stat -c %s ${image.initramfs})")
+            ${packages.${system}.remu}/bin/remu binary \
+                ${image.opensbi}/fw_dynamic.bin \
+                <(sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc) \
+                ${image.linux}/Image \
+                ${image.initramfs}
+          ''}";
+
+        };
       };
     };
 }
