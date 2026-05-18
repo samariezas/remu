@@ -2,6 +2,7 @@ const std = @import("std");
 const bus = @import("bus.zig");
 const io = @import("io.zig");
 const qpu = @import("qpu.zig");
+const config = @import("config");
 const instruction_cache = @import("instruction_cache.zig");
 const IoHandler = io.IoHandler;
 pub const privilege = @import("privilege.zig");
@@ -456,8 +457,11 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         const TError = ExecutionError(Tword);
         const Instr = InstructionDescriptor(opt);
 
-        // const TICache = instruction_cache.ICache(Tword, Instr);
-        const TICache = instruction_cache.ArrICache(Tword, Instr);
+        const TICache = switch (config.cache_strategy) {
+            .None => instruction_cache.DummyICache(Tword, Instr),
+            .HashMap => instruction_cache.ICache(Tword, Instr),
+            .Array => instruction_cache.ArrICache(Tword, Instr),
+        };
 
         const InterruptCause = enum(u5) {
             supervisor_software = 1,
@@ -1752,7 +1756,7 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
                 .ppn = 0,
                 .qpu_ctx = 0,
                 .qpu = qpu.Qpu(Tword).init(allocator),
-                .instruction_cache = try TICache.init(allocator, 1048573),
+                .instruction_cache = try TICache.init(allocator, config.cache_size),
             };
         }
 

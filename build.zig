@@ -1,5 +1,11 @@
 const std = @import("std");
 
+const CacheType = enum {
+    None,
+    HashMap,
+    Array,
+};
+
 fn buildC(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const c_translate = b.addTranslateC(.{
         .link_libc = false,
@@ -29,13 +35,17 @@ fn buildC(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     return c_translate.createModule();
 }
 
-fn buildRemuStep(b: *std.Build, root_module: *std.Build.Module, use_llvm: bool) *std.Build.Step.Compile {
+fn buildRemuStep(b: *std.Build, root_module: *std.Build.Module, use_llvm: bool, cache_strategy: CacheType, cache_size: usize) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = "remu",
         .root_module = root_module,
         .link_libc = true,
         .use_llvm = use_llvm,
     });
+    const options = b.addOptions();
+    options.addOption(CacheType, "cache_strategy", cache_strategy);
+    options.addOption(usize, "cache_size", cache_size);
+    exe.root_module.addOptions("config", options);
     exe.linkSystemLibrary("elf");
     exe.linkSystemLibrary("quantum");
     exe.linkSystemLibrary("quantum_wrap");
@@ -59,17 +69,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const cache_strategy = b.option(CacheType, "cache_strategy", "Instruction cache strategy") orelse CacheType.Array;
+    const cache_size = b.option(usize, "cache_size", "Instruction cache size") orelse 1048573;
+
     const root_tests_module = b.createModule(.{
         .root_source_file = b.path("tests.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const exe = buildRemuStep(b, root_module, use_llvm);
+    const exe = buildRemuStep(b, root_module, use_llvm, cache_strategy, cache_size);
     b.installArtifact(exe);
 
     const check_step = b.step("check", "Check if remu compiles");
-    const exe_check = buildRemuStep(b, root_module, false);
+    const exe_check = buildRemuStep(b, root_module, false, cache_strategy, cache_size);
     const tests = b.addTest(.{
         .root_module = root_tests_module,
         .use_llvm = false
