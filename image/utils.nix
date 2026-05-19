@@ -5,12 +5,15 @@ pkgsCross.stdenv.mkDerivation {
   src = ./utils;
 
   buildPhase = ''
-    riscv64-unknown-linux-musl-gcc floating.c -o floating
+    mkdir -p ./build
+    for CFILE in ./*.c; do
+        riscv64-unknown-linux-musl-gcc -O2 -Wall $CFILE -o "./build/''${CFILE%.*}"
+    done
   '';
 
   installPhase = ''
     mkdir -p $out/bin
-    cp floating $out/bin
+    cp ./build/* $out/bin
   '';
 
   fixupPhase = ''
