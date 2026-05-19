@@ -5,8 +5,10 @@ pkgsCross.stdenv.mkDerivation {
   src = ./utils;
 
   buildPhase = ''
-    riscv64-unknown-linux-musl-gcc -O2 -Wall floating.c -o floating
-    riscv64-unknown-linux-musl-gcc -O2 -Wall grover.c -o grover
+    mkdir -p ./build
+    for CFILE in ./*.c; do
+        riscv64-unknown-linux-musl-gcc -O2 -Wall $CFILE -o "./build/''${CFILE%.*}"
+    done
     riscv64-unknown-linux-musl-gcc -DLIBQPU -x c -c -Wall qpu.h -o libqpu.o
     riscv64-unknown-linux-musl-ar rcs libqpu.a libqpu.o 
   '';
@@ -15,7 +17,7 @@ pkgsCross.stdenv.mkDerivation {
     mkdir -p $out/bin $out/include $out/lib
     cp qpu.h $out/include
     cp libqpu.a $out/lib
-    cp floating grover $out/bin
+    cp ./build/* $out/bin
   '';
 
   fixupPhase = ''
