@@ -50,7 +50,7 @@
         fi
         
         set -x
-        "$EMULATOR" binary \
+        "$EMULATOR" \
             ./opensbi.bin \
             ./machine.dtb \
             ./linux \
@@ -159,7 +159,7 @@
           type = "app";
           program = "${pkgs.writeShellScript "run_riscv_tests" ''
             INITRD_SIZE=$(printf "%07x" "$(stat -c %s ${image.initramfs})")
-            ${packages.${system}.remu}/bin/remu binary \
+            ${packages.${system}.remu}/bin/remu \
                 ${image.opensbi}/fw_dynamic.bin \
                 <(sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc) \
                 ${image.linux}/Image \

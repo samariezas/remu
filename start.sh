@@ -81,7 +81,7 @@ if $USE_PERF; then
 fi
 
 COMMAND+=(
-    zig-out/bin/remu binary
+    zig-out/bin/remu
     "${OPENSBI_LOCATION}/fw_dynamic.bin"
     "${DTB_FILE}"
     "${LINUX_LOCATION}/Image"
