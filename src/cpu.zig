@@ -1772,7 +1772,14 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
             return null;
         }
 
+        fn getCsrPrivilegeRequirement(id: Tcsrid) u2 {
+            return @truncate((id >> 8) & 0b11);
+        }
+
         fn readCsr(self: *Self, id: Tcsrid) ?Tword {
+            if (self.current_privilege_level.getEncoding() < Self.getCsrPrivilegeRequirement(id)) {
+                return null;
+            }
             if (findCsr(id)) |csr| {
                 const csr_read = csr.read_handler(self);
                 return csr_read;
@@ -1781,6 +1788,9 @@ pub fn RVCPU(comptime opt: cpu_config.CpuOptions) type {
         }
 
         fn writeCsr(self: *Self, id: Tcsrid, value: Tword) ?TError {
+            if (self.current_privilege_level.getEncoding() < Self.getCsrPrivilegeRequirement(id)) {
+                return null;
+            }
             if (findCsr(id)) |csr| {
                 if (csr.write_handler) |handler| {
                     handler(self, value);
