@@ -1,8 +1,8 @@
 { pkgs, pkgsCross }:
 pkgsCross.stdenv.mkDerivation {
-  name = "floating";
+  name = "utils";
   version = "0.0.1";
-  src = ./floating;
+  src = ./utils;
 
   buildPhase = ''
     riscv64-unknown-linux-musl-gcc floating.c -o floating
