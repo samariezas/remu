@@ -66,8 +66,7 @@ fi
 set -x
 nix build ".#image-initramfs" -o "${INITRD_LOCATION}"
 echo "Building DTB"
-INITRD_SIZE=$(printf "%07x" "$(stat -c %s $(readlink ${INITRD_LOCATION}))")
-sed "s/{INITRD_SIZE}/${INITRD_SIZE}/" ./simple.dts.template | dtc > "${DTB_FILE}"
+dtc < ./remu.dts > "${DTB_FILE}"
 zig build "-Doptimize=${ZIG_OPTIMIZATION_LEVEL}"
 
 COMMAND=()

@@ -131,8 +131,7 @@
             cp ${image.opensbi}/fw_dynamic.bin ./remu-package/opensbi.bin
             cp ${run-script} ./remu-package/run.sh
             chmod +x ./remu-package/run.sh
-            INITRD_SIZE=$(printf "%07x" "$(stat -c %s ./remu-package/initrd)")
-            sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc > ./remu-package/machine.dtb
+            ${pkgs.dtc}/bin/dtc ${./remu.dts} > ./remu-package/machine.dtb
             tar cvzf $out ./remu-package
           '';
         };
@@ -158,10 +157,9 @@
         default = {
           type = "app";
           program = "${pkgs.writeShellScript "run_riscv_tests" ''
-            INITRD_SIZE=$(printf "%07x" "$(stat -c %s ${image.initramfs})")
             ${packages.${system}.remu}/bin/remu \
                 ${image.opensbi}/fw_dynamic.bin \
-                <(sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc) \
+                <(cat ${./remu.dts} | ${pkgs.dtc}/bin/dtc) \
                 ${image.linux}/Image \
                 ${image.initramfs}
           ''}";

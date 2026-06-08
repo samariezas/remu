@@ -8,8 +8,8 @@
   chosen {
     stdout-path = &SERIAL0;
     bootargs = "console=ttyS0 earlycon";
-    linux,initrd-start = <0xa0000000>;
-    linux,initrd-end =   <0xa{INITRD_SIZE}>;
+    linux,initrd-start = <0x0>;
+    linux,initrd-end =   <0x0>;
   };
   cpus {
     #address-cells = <1>;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const libfdt = @import("c_libfdt");
 const cpu = @import("cpu.zig");
 const bus = @import("bus.zig");
 const io = @import("io.zig");
@@ -296,23 +297,42 @@ fn alignOnPage(T: type, i: *T) void {
     i.* = new_value;
 }
 
+fn readFile(allocator: Allocator, image_path: []const u8) ![]u8 {
+    const MAX_FILESIZE = 64*1024*1024;
+    return std.fs.cwd().readFileAlloc(
+        allocator, image_path, MAX_FILESIZE
+    );
+}
+
+fn loadBytes(
+    comptime opt: CpuOptions,
+    rvcpu: *cpu.RVCPU(opt),
+    image_data: []const u8,
+    current_address: opt.getTword(),
+) !opt.getTword() {
+    try rvcpu.loadData(current_address, image_data);
+    var end_address = current_address + image_data.len;
+    alignOnPage(opt.getTword(), &end_address);
+    return end_address;
+}
+
 fn loadImage(
     comptime opt: CpuOptions,
     allocator: Allocator,
     rvcpu: *cpu.RVCPU(opt),
-    image: []const u8,
-    current_location: opt.getTword(),
+    image_path: []const u8,
+    current_address: opt.getTword(),
 ) !opt.getTword() {
-    const MAX_FILESIZE = 64*1024*1024;
-    const Tword = opt.getTword();
-    const image_data = try std.fs.cwd().readFileAlloc(
-        allocator, image, MAX_FILESIZE
-    );
+    const image_data = try readFile(allocator, image_path);
     defer allocator.free(image_data);
-    try rvcpu.loadData(current_location, image_data);
-    var end_address = current_location + image_data.len;
-    alignOnPage(Tword, &end_address);
-    return end_address;
+    return loadBytes(opt, rvcpu, image_data, current_address);
+}
+
+fn patchDtb(fdt: []u8, initrd_start: u32, initrd_end: u32) !void {
+    const node = libfdt.fdt_path_offset(fdt.ptr, "/chosen");
+    if (node < 0) return error.FdtPathNotFound;
+    if (libfdt.fdt_setprop_inplace_u32(fdt.ptr, node, "linux,initrd-start", initrd_start) != 0) return error.CannotReplaceInitrdStart;
+    if (libfdt.fdt_setprop_inplace_u32(fdt.ptr, node, "linux,initrd-end", initrd_end) != 0) return error.CannotReplaceInitrdEnd;
 }
 
 // TODO: read OpenSBI as ELF
@@ -365,12 +385,6 @@ pub fn runRemuBinary(
         &io_handler
     );
 
-    // const stdin = std.io.getStdIn();
-    // const stdin_reader = stdin.reader();
-    // const any_stdin_reader = stdin_reader.any();
-    // const flags = try posix.fcntl(stdin.handle, posix.F.GETFL, 0);
-    // _ = try posix.fcntl(stdin.handle, posix.F.SETFL, flags | linux.IN.NONBLOCK);
-
     var rvcpu = try cpu_type.initWithBus(
         allocator,
         opensbi_start,
@@ -382,8 +396,18 @@ pub fn runRemuBinary(
     defer rvcpu.deinit();
 
     _ = try loadImage(opt, allocator, &rvcpu, opensbi_path, opensbi_start);
-    _ = try loadImage(opt, allocator, &rvcpu, initrd_path, initrd_start);
-    const dtb_end = try loadImage(opt, allocator, &rvcpu, dtb_path, dtb_start);
+    const initrd_end: Tword = initrd_end: {
+        const initrd_data = try readFile(allocator, initrd_path);
+        defer allocator.free(initrd_data);
+        _ = try loadBytes(opt, &rvcpu, initrd_data, initrd_start);
+        break :initrd_end (initrd_start + initrd_data.len);
+    };
+    const dtb_end: Tword = dtb_end: {
+        const dtb_data = try readFile(allocator, dtb_path);
+        defer allocator.free(dtb_data);
+        try patchDtb(dtb_data, @truncate(initrd_start), @truncate(initrd_end));
+        break :dtb_end (try loadBytes(opt, &rvcpu, dtb_data, dtb_start));
+    };
     const fwinfo_start = dtb_end + 4096;
     _ = try loadImage(opt, allocator, &rvcpu, kernel_path, kernel_start);
     const next_boot_info = FwDynamicInfo {
