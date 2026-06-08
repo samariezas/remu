@@ -21,7 +21,7 @@ rec {
   linux = import ./linux.nix { inherit pkgsCross pkgs; };
   initramfs = import ./initramfs.nix {
     inherit pkgs;
-    derivations = [ musl busybox lua utils tcc samples vim ];
+    derivations = [ musl busybox lua utils tcc samples ];
   };
   opensbi = import ./opensbi.nix { inherit pkgsCross pkgs; };
 }

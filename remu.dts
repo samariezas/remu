@@ -8,8 +8,8 @@
   chosen {
     stdout-path = &SERIAL0;
     bootargs = "console=ttyS0 earlycon";
-    linux,initrd-start = <0xa0000000>;
-    linux,initrd-end =   <0xa{INITRD_SIZE}>;
+    linux,initrd-start = <0x0>;
+    linux,initrd-end =   <0x0>;
   };
   cpus {
     #address-cells = <1>;
@@ -21,7 +21,7 @@
       status = "okay";
       compatible = "riscv";
       riscv,isa = "rv64ima";
-      riscv,isa-extensions = "i", "m", "a", "xqpu";
+      riscv,isa-extensions = "i", "m", "a";
       mmu-type = "riscv,sv39";
       clock-frequency = <1000000000>;
       CPU0_intc: interrupt-controller {

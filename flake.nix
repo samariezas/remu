@@ -21,6 +21,14 @@
       };
       tests = import ./tests { inherit pkgs; };
       image = import ./image { inherit pkgs pkgsCross; };
+      zig-build-inputs = with pkgs; [
+        glibc
+        libelf
+        zig
+
+        tests.spike-mod
+        dtc
+      ];
     in {
       packages.${system} = with tests; {
         inherit riscv-tests
@@ -32,18 +40,52 @@
         image-tcc = tcc;
         image-ncurses = ncurses;
         image-vim = vim;
+
+        remu = pkgs.stdenv.mkDerivation {
+          name = "remu";
+          version = "0.0.1";
+          src = ./.;
+
+          buildInputs = zig-build-inputs;
+          
+          buildPhase = ''
+              export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global-cache"
+              export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-cache"
+              zig build \
+                  --color off \
+                  --summary all \
+                  -Doptimize=ReleaseSafe
+          '';
+
+          installPhase = ''
+              mkdir -p $out/bin
+              cp zig-out/bin/remu $out/bin
+          '';
+
+          meta.mainProgram = "remu";
+        };
+
+        remu-package = pkgs.stdenv.mkDerivation {
+          name = "remu-package";
+          version = "0.0.1";
+
+          unpackPhase = ''true'';
+
+          buildPhase = ''
+            mkdir -p remu-package
+            cp ${image.initramfs} ./remu-package/initrd
+            cp ${image.linux}/Image ./remu-package/linux
+            cp ${image.opensbi}/fw_dynamic.bin ./remu-package/opensbi.bin
+            INITRD_SIZE=$(printf "%07x" "$(stat -c %s ./remu-package/initrd)")
+            sed "s/{INITRD_SIZE}/$INITRD_SIZE/" ${./simple.dts.template} | ${pkgs.dtc}/bin/dtc > ./remu-package/machine.dtb
+            tar cvzf $out ./remu-package
+          '';
+        };
       });
 
       devShells.${system} = {
         default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            glibc
-            libelf
-            zig
-
-            tests.spike-mod
-            dtc
-          ];
+          buildInputs = zig-build-inputs;
         };
         riscv = tests.riscv-devshell;
         riscv-musl = pkgsCross.mkShell { };
